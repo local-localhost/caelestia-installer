@@ -657,8 +657,8 @@ main() {
   require_supported_os
   trap cleanup EXIT INT TERM
   export PACMAN_AUTH="${PACMAN_AUTH:-sudo}"
-  acquire_lock
   ensure_sudo
+  acquire_lock
 
   log "Preparing installation for $OS_ID"
 
