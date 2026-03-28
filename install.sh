@@ -427,7 +427,7 @@ remove_old_dependency_conflicts() {
   )
 
   for pkg in "${cleanup_list[@]}"; do
-    if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+    if ! pacman -Qq | grep -Fxq "$pkg"; then
       continue
     fi
 
@@ -495,6 +495,24 @@ update_or_clone_repo() {
   fi
 }
 
+repo_version_for_cmake() {
+  local repo_dir="$1"
+  local version=""
+  local commit_count=""
+
+  version="$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || true)"
+  if [[ -n "$version" ]]; then
+    printf '%s\n' "${version#v}"
+    return 0
+  fi
+
+  commit_count="$(git -C "$repo_dir" rev-list --count HEAD 2>/dev/null || true)"
+  [[ -n "$commit_count" ]] || commit_count="0"
+
+  warn "No git tags found in $repo_dir, using fallback version 0.0.$commit_count"
+  printf '0.0.%s\n' "$commit_count"
+}
+
 install_cli() {
   log "Installing caelestia-cli from source..."
   update_or_clone_repo "$CLI_DIR" "$CLI_REPO_URL" "CLI"
@@ -511,12 +529,21 @@ install_cli() {
 }
 
 install_shell() {
+  local version=""
+  local revision=""
+
   log "Installing caelestia-shell from source..."
   update_or_clone_repo "$SHELL_DIR" "$SHELL_REPO_URL" "shell"
+  version="$(repo_version_for_cmake "$SHELL_DIR")"
+  revision="$(git -C "$SHELL_DIR" rev-parse HEAD)"
 
   (
     cd "$SHELL_DIR"
-    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/
+    cmake -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/ \
+      -DVERSION="$version" \
+      -DGIT_REVISION="$revision"
     cmake --build build
     run_root cmake --install build
   )
