@@ -45,7 +45,6 @@ python-installer
 python-pillow
 qt6-base
 qt6-declarative
-quickshell
 slurp
 starship
 swappy

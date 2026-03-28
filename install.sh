@@ -85,6 +85,27 @@ print(sysconfig.get_paths()["purelib"])
 PY
 }
 
+expand_home_path() {
+  local path="$1"
+  path="${path/#\~/$HOME}"
+  path="${path//\$\{HOME\}/$HOME}"
+  path="${path//\$HOME/$HOME}"
+  printf '%s\n' "$path"
+}
+
+default_wallpaper_dir() {
+  local pictures_dir=""
+
+  if [[ -n "${CAELESTIA_WALLPAPERS_DIR:-}" ]]; then
+    expand_home_path "$CAELESTIA_WALLPAPERS_DIR"
+    return
+  fi
+
+  pictures_dir="${XDG_PICTURES_DIR:-$HOME/Pictures}"
+  pictures_dir="$(expand_home_path "$pictures_dir")"
+  printf '%s/Wallpapers\n' "$pictures_dir"
+}
+
 run_root() {
   sudo "$@"
 }
@@ -223,6 +244,14 @@ write_if_missing() {
   local path="$1"
   mkdir -p "$(dirname "$path")"
   [[ -e "$path" || -L "$path" ]] || : > "$path"
+}
+
+write_text_if_missing() {
+  local path="$1"
+  local content="$2"
+
+  mkdir -p "$(dirname "$path")"
+  [[ -e "$path" || -L "$path" ]] || printf '%s' "$content" > "$path"
 }
 
 parse_args() {
@@ -421,7 +450,7 @@ remove_stale_cli_python_package() {
 remove_old_dependency_conflicts() {
   local pkg=""
   local cleanup_list=(
-    quickshell-git
+    quickshell
     qtengine
     qtengine-bin
   )
@@ -549,6 +578,27 @@ install_shell() {
   )
 }
 
+warn_quickshell_default_config() {
+  local quickshell_dir="$XDG_CONFIG_HOME/quickshell"
+  local default_config="$quickshell_dir/shell.qml"
+  local resolved_dir=""
+  local resolved_config=""
+
+  if [[ -L "$quickshell_dir" ]]; then
+    resolved_dir="$(readlink -f "$quickshell_dir" 2>/dev/null || true)"
+    if [[ -n "$resolved_dir" ]]; then
+      warn "Detected an existing quickshell config symlink: $quickshell_dir -> $resolved_dir"
+    fi
+  fi
+
+  if [[ -e "$default_config" ]]; then
+    resolved_config="$(readlink -f "$default_config" 2>/dev/null || true)"
+    warn "Detected an existing quickshell default config: ${resolved_config:-$default_config}"
+    warn "The plain 'quickshell' command will launch that config, not Caelestia."
+    warn "Start Caelestia with 'caelestia shell -d' or 'qs -c caelestia'."
+  fi
+}
+
 install_dotfiles() {
   log "Installing dotfiles..."
   update_or_clone_repo "$DOTFILES_DIR" "$DOTFILES_REPO_URL" "dotfiles"
@@ -568,8 +618,16 @@ install_dotfiles() {
 }
 
 initialize_caelestia() {
+  local wallpaper_dir=""
+
   log "Running first-time Caelestia initialization..."
-  mkdir -p "$XDG_STATE_HOME/caelestia"
+  mkdir -p "$XDG_CONFIG_HOME/caelestia" "$XDG_STATE_HOME/caelestia" "$XDG_STATE_HOME/caelestia/wallpaper"
+  wallpaper_dir="$(default_wallpaper_dir)"
+  mkdir -p "$wallpaper_dir"
+
+  write_text_if_missing "$XDG_CONFIG_HOME/caelestia/shell.json" "{}"
+  write_text_if_missing "$XDG_STATE_HOME/caelestia/notifs.json" "[]"
+  write_if_missing "$XDG_STATE_HOME/caelestia/wallpaper/path.txt"
 
   if command -v caelestia >/dev/null 2>&1; then
     if [[ ! -f "$XDG_STATE_HOME/caelestia/scheme.json" ]]; then
@@ -701,7 +759,8 @@ Installation complete.
 Next recommended steps:
   1. If you use a login manager, configure and enable it separately
   2. Log into hyprland
-  3. Run 'nwg-displays' and set your monitor layout
+  3. If you test the shell manually, use 'caelestia shell -d' or 'qs -c caelestia'
+  4. Run 'nwg-displays' and set your monitor layout
 
 If any existing config paths were replaced, backups are in:
   ${BACKUP_DIR:-No backups were needed}
@@ -730,6 +789,7 @@ main() {
   install_packages
   install_cli
   install_shell
+  warn_quickshell_default_config
   install_dotfiles
   initialize_caelestia
 
