@@ -44,7 +44,7 @@ usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME [options]
 
-Installer for Caelestia dotfiles
+Installer for the Caelestia dotfiles
 
 Options:
   -h, --help            Show this help text
@@ -311,7 +311,7 @@ require_supported_os() {
     arch|cachyos)
       ;;
     *)
-      die "Unsupported distribution: ${OS_ID:-unknown}. This installer support only Arch Linux."
+      die "Unsupported distribution: ${OS_ID:-unknown}. This installer supports only Arch Linux"
       ;;
   esac
 }
@@ -600,6 +600,8 @@ warn_quickshell_default_config() {
 }
 
 install_dotfiles() {
+  local hypr_scripts=()
+
   log "Installing dotfiles..."
   update_or_clone_repo "$DOTFILES_DIR" "$DOTFILES_REPO_URL" "dotfiles"
 
@@ -611,7 +613,12 @@ install_dotfiles() {
   link_path "$DOTFILES_DIR/btop" "$XDG_CONFIG_HOME/btop"
   link_path "$DOTFILES_DIR/starship.toml" "$XDG_CONFIG_HOME/starship.toml"
 
-  chmod u+x "$XDG_CONFIG_HOME/hypr/scripts/"*.fish
+  shopt -s nullglob
+  hypr_scripts=( "$XDG_CONFIG_HOME"/hypr/scripts/*.fish )
+  shopt -u nullglob
+  if ((${#hypr_scripts[@]} > 0)); then
+    chmod u+x "${hypr_scripts[@]}"
+  fi
 
   write_if_missing "$XDG_CONFIG_HOME/caelestia/hypr-vars.conf"
   write_if_missing "$XDG_CONFIG_HOME/caelestia/hypr-user.conf"
@@ -759,8 +766,7 @@ Installation complete.
 Next recommended steps:
   1. If you use a login manager, configure and enable it separately
   2. Log into hyprland
-  3. If you test the shell manually, use 'caelestia shell -d' or 'qs -c caelestia'
-  4. Run 'nwg-displays' and set your monitor layout
+  3. Run 'nwg-displays' and set your monitor layout
 
 If any existing config paths were replaced, backups are in:
   ${BACKUP_DIR:-No backups were needed}

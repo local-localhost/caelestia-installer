@@ -1,25 +1,28 @@
-# simple caelestia-installer
+# Installer for the fork caelestia with improvements
 
+## Supported systems
 
-## Installation
+- Arch Linux
+- CachyOS
+
+## Quick start
 
 ```sh
 git clone https://github.com/local-localhost/caelestia-installer.git
 cd caelestia-installer
-chmod +x install.sh
-./install.sh
+bash install.sh
 ```
 
 ## without confirm
 
 ```sh
-./install.sh -y
+bash install.sh -y
 ```
 
-## Optional integrations
+## Optional components
 
 ```sh
-./install.sh -y --spotify --vscode codium --discord --zen
+bash install.sh -y --spotify --vscode codium --discord --zen
 ```
 
 ## Options
@@ -33,8 +36,3 @@ chmod +x install.sh
 --vscode code
 --vscode codium
 ```
-
-## Notes
-
-- Existing config paths are backed up to `~/.local/state/caelestia-installer/backups/<timestamp>/`.
-- After installation, run `nwg-displays` and set your monitor layout.

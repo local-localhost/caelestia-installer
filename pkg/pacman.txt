@@ -17,10 +17,9 @@ fuzzel
 git
 glib2
 gnome-keyring
-greetd
+greetd-tuigreet
 grim
 gpu-screen-recorder
-greetd-tuigreet
 hyprland
 hyprpicker
 inotify-tools
