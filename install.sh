@@ -78,6 +78,13 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
+python_purelib_dir() {
+  python - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+}
+
 run_root() {
   sudo "$@"
 }
@@ -328,18 +335,7 @@ ensure_yay() {
   rm -rf -- "$tmp_dir"
 }
 
-remove_quickshell_git() {
-  if ! pacman -Q quickshell-git >/dev/null 2>&1; then
-    return
-  fi
-
-  warn "Removing 'quickshell-git' so stable 'quickshell' can be installed."
-  run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" quickshell-git
-}
-
 install_packages() {
-  remove_quickshell_git
-
   log "Installing official repository packages..."
   run_root pacman -S "${PACMAN_ARGS[@]}" "${PACMAN_PACKAGES[@]}"
 
@@ -373,7 +369,7 @@ remove_conflicting_packages() {
 remove_stale_caelestia_binary() {
   local owner=""
 
-  [[ -e /usr/bin/caelestia ]] || return
+  [[ -e /usr/bin/caelestia ]] || return 0
 
   if pacman -Qo /usr/bin/caelestia >/dev/null 2>&1; then
     owner="$(pacman -Qo /usr/bin/caelestia 2>/dev/null | awk '{print $5}')"
@@ -382,6 +378,73 @@ remove_stale_caelestia_binary() {
 
   warn "Removing unowned stale binary: /usr/bin/caelestia"
   run_root rm -f /usr/bin/caelestia
+}
+
+remove_stale_cli_python_package() {
+  local purelib=""
+  local package_dir=""
+  local owner=""
+  local cleanup_paths=()
+  local path=""
+  local dist_info=()
+
+  if ! command -v python >/dev/null 2>&1; then
+    return 0
+  fi
+
+  purelib="$(python_purelib_dir)"
+  [[ -n "$purelib" ]] || die "Could not determine Python site-packages directory."
+
+  package_dir="$purelib/caelestia"
+  shopt -s nullglob
+  dist_info=( "$purelib"/caelestia-*.dist-info )
+  shopt -u nullglob
+
+  [[ -e "$package_dir" ]] && cleanup_paths+=( "$package_dir" )
+  for path in "${dist_info[@]}"; do
+    [[ -e "$path" ]] && cleanup_paths+=( "$path" )
+  done
+
+  ((${#cleanup_paths[@]} > 0)) || return 0
+
+  for path in "${cleanup_paths[@]}"; do
+    if pacman -Qo "$path" >/dev/null 2>&1; then
+      owner="$(pacman -Qo "$path" 2>/dev/null | awk '{print $5}')"
+      die "$path is owned by package '$owner'. Remove the conflicting package first and rerun the installer."
+    fi
+  done
+
+  warn "Removing previous manually installed caelestia Python files."
+  run_root rm -rf -- "${cleanup_paths[@]}"
+}
+
+remove_old_dependency_conflicts() {
+  local pkg=""
+  local cleanup_list=(
+    quickshell-git
+    qtengine
+    qtengine-bin
+  )
+
+  for pkg in "${cleanup_list[@]}"; do
+    if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+      continue
+    fi
+
+    warn "Removing conflicting package: $pkg"
+    if ! run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" "$pkg"; then
+      warn "Regular removal failed for $pkg, trying a forced dependency cleanup."
+      run_root pacman -Rdd "${PACMAN_REMOVE_ARGS[@]}" "$pkg" || die "Failed to remove conflicting package: $pkg"
+    fi
+  done
+}
+
+cleanup_old_install_state() {
+  log "Cleaning up old installs and conflicting packages..."
+  remove_conflicting_packages
+  remove_old_dependency_conflicts
+  remove_stale_caelestia_binary
+  remove_stale_cli_python_package
 }
 
 update_or_clone_repo() {
@@ -436,6 +499,7 @@ install_cli() {
   log "Installing caelestia-cli from source..."
   update_or_clone_repo "$CLI_DIR" "$CLI_REPO_URL" "CLI"
   remove_stale_caelestia_binary
+  remove_stale_cli_python_package
 
   (
     cd "$CLI_DIR"
@@ -635,7 +699,7 @@ main() {
   fi
 
   ensure_yay
-  remove_conflicting_packages
+  cleanup_old_install_state
   install_packages
   install_cli
   install_shell
