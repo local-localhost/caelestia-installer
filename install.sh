@@ -91,7 +91,7 @@ PACMAN_PACKAGES=(
   ttf-cascadia-code-nerd
   ttf-jetbrains-mono-nerd
   ttf-material-symbols-variable
-  tuigreet
+  greetd-tuigreet
   uwsm
   wireplumber
   wl-clipboard
