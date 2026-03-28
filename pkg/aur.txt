@@ -1,0 +1,5 @@
+app2unit
+libcava
+python-materialyoucolor
+qtengine-git
+ttf-rubik-vf

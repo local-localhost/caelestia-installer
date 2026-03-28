@@ -3,6 +3,8 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PKG_DIR="$SCRIPT_DIR/pkg"
 
 REPO_OWNER="${REPO_OWNER:-local-localhost}"
 GITHUB_REPO_BASE="https://github.com/$REPO_OWNER"
@@ -35,78 +37,8 @@ OS_ID=""
 LOCK_FILE="$STATE_DIR/install.lock"
 SUDO_KEEPALIVE_PID=""
 TEMP_DIRS=()
-
-PACMAN_PACKAGES=(
-  adw-gtk-theme
-  aubio
-  bash
-  brightnessctl
-  btop
-  cava
-  cliphist
-  cmake
-  dart-sass
-  dconf
-  ddcutil
-  eza
-  fastfetch
-  fish
-  foot
-  fuzzel
-  git
-  glib2
-  gnome-keyring
-  greetd
-  grim
-  gpu-screen-recorder
-  hyprland
-  hyprpicker
-  inotify-tools
-  jq
-  libnotify
-  libqalculate
-  lm_sensors
-  networkmanager
-  ninja
-  nwg-displays
-  papirus-icon-theme
-  pipewire
-  polkit-gnome
-  power-profiles-daemon
-  pybind11
-  python
-  python-build
-  python-hatch
-  python-hatch-vcs
-  python-hatchling
-  python-installer
-  python-pillow
-  qt6-base
-  qt6-declarative
-  slurp
-  starship
-  swappy
-  thunar
-  trash-cli
-  ttf-cascadia-code-nerd
-  ttf-jetbrains-mono-nerd
-  ttf-material-symbols-variable
-  greetd-tuigreet
-  uwsm
-  wireplumber
-  wl-clipboard
-  xdg-desktop-portal-gtk
-  xdg-desktop-portal-hyprland
-)
-
-AUR_PACKAGES=(
-  app2unit
-  libcava
-  python-materialyoucolor
-  quickshell-git
-  qtengine-git
-  ttf-rubik-vf
-)
+PACMAN_PACKAGES=()
+AUR_PACKAGES=()
 
 usage() {
   cat <<EOF
@@ -177,6 +109,24 @@ acquire_lock() {
 
 register_temp_dir() {
   TEMP_DIRS+=( "$1" )
+}
+
+load_package_list() {
+  local list_path="$1"
+  local -n target_array="$2"
+
+  [[ -r "$list_path" ]] || die "Package list not found: $list_path"
+
+  mapfile -t target_array < <(
+    sed -E 's/[[:space:]]+#.*$//' "$list_path" | sed -E '/^[[:space:]]*$/d'
+  )
+
+  ((${#target_array[@]} > 0)) || die "Package list is empty: $list_path"
+}
+
+load_package_lists() {
+  load_package_list "$PKG_DIR/pacman.txt" PACMAN_PACKAGES
+  load_package_list "$PKG_DIR/aur.txt" AUR_PACKAGES
 }
 
 confirm() {
@@ -305,7 +255,13 @@ setup_package_args() {
   if $YES; then
     PACMAN_ARGS+=(--noconfirm)
     PACMAN_REMOVE_ARGS+=(--noconfirm)
-    YAY_ARGS+=(--noconfirm)
+    YAY_ARGS+=(
+      --noconfirm
+      --answerclean None
+      --answerdiff None
+      --answeredit None
+      --answerupgrade None
+    )
     MAKEPKG_ARGS+=(--noconfirm)
   fi
 }
@@ -372,7 +328,18 @@ ensure_yay() {
   rm -rf -- "$tmp_dir"
 }
 
+remove_quickshell_git() {
+  if ! pacman -Q quickshell-git >/dev/null 2>&1; then
+    return
+  fi
+
+  warn "Removing 'quickshell-git' so stable 'quickshell' can be installed."
+  run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" quickshell-git
+}
+
 install_packages() {
+  remove_quickshell_git
+
   log "Installing official repository packages..."
   run_root pacman -S "${PACMAN_ARGS[@]}" "${PACMAN_PACKAGES[@]}"
 
@@ -653,6 +620,7 @@ EOF
 main() {
   parse_args "$@"
   ensure_not_root
+  load_package_lists
   setup_package_args
   require_supported_os
   trap cleanup EXIT INT TERM
