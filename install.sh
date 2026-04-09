@@ -373,11 +373,21 @@ install_packages() {
 }
 
 remove_conflicting_packages() {
+  local candidates=(
+    caelestia-meta
+    caelestia-cli
+    caelestia-cli-git
+    caelestia-shell
+    caelestia-shell-git
+  )
+  local installed_packages=()
   local conflicts=()
   local pkg=""
 
-  for pkg in caelestia-meta caelestia-cli caelestia-cli-git caelestia-shell caelestia-shell-git; do
-    if pacman -Q "$pkg" >/dev/null 2>&1; then
+  mapfile -t installed_packages < <(pacman -Qq 2>/dev/null || true)
+
+  for pkg in "${candidates[@]}"; do
+    if printf '%s\n' "${installed_packages[@]}" | grep -Fxq -- "$pkg"; then
       conflicts+=("$pkg")
     fi
   done
@@ -389,7 +399,15 @@ remove_conflicting_packages() {
   warn "Detected conflicting packaged Caelestia installs: ${conflicts[*]}"
 
   if confirm "Remove conflicting packaged versions before installing from source?"; then
-    run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" "${conflicts[@]}"
+    for pkg in "${conflicts[@]}"; do
+      if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+        log "Skipping already removed conflict: $pkg"
+        continue
+      fi
+
+      log "Removing conflicting package: $pkg"
+      run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
+    done
   else
     die "Conflicting packaged Caelestia versions must be removed before continuing."
   fi
