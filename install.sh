@@ -374,11 +374,11 @@ install_packages() {
 
 remove_conflicting_packages() {
   local candidates=(
-    caelestia-meta
-    caelestia-cli
-    caelestia-cli-git
-    caelestia-shell
     caelestia-shell-git
+    caelestia-shell
+    caelestia-cli-git
+    caelestia-cli
+    caelestia-meta
   )
   local installed_packages=()
   local conflicts=()
@@ -406,7 +406,7 @@ remove_conflicting_packages() {
       fi
 
       log "Removing conflicting package: $pkg"
-      run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
+      run_root pacman -R "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
     done
   else
     die "Conflicting packaged Caelestia versions must be removed before continuing."
