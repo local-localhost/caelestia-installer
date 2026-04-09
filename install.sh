@@ -27,9 +27,11 @@ INSTALL_DISCORD=false
 INSTALL_ZEN=false
 VSCODE_VARIANT=""
 
-PACMAN_ARGS=(--needed)
+PACMAN_BOOTSTRAP_ARGS=(--needed)
+PACMAN_INSTALL_ARGS=()
 PACMAN_REMOVE_ARGS=()
-YAY_ARGS=(--needed)
+YAY_BOOTSTRAP_ARGS=(--needed)
+YAY_INSTALL_ARGS=()
 MAKEPKG_ARGS=()
 
 BACKUP_DIR=""
@@ -289,9 +291,17 @@ parse_args() {
 
 setup_package_args() {
   if $YES; then
-    PACMAN_ARGS+=(--noconfirm)
+    PACMAN_BOOTSTRAP_ARGS+=(--noconfirm)
+    PACMAN_INSTALL_ARGS+=(--noconfirm)
     PACMAN_REMOVE_ARGS+=(--noconfirm)
-    YAY_ARGS+=(
+    YAY_BOOTSTRAP_ARGS+=(
+      --noconfirm
+      --answerclean None
+      --answerdiff None
+      --answeredit None
+      --answerupgrade None
+    )
+    YAY_INSTALL_ARGS+=(
       --noconfirm
       --answerclean None
       --answerdiff None
@@ -346,11 +356,11 @@ ensure_yay() {
   log "yay not found, installing it..."
 
   if [[ "$OS_ID" == "cachyos" ]]; then
-    run_root pacman -S "${PACMAN_ARGS[@]}" yay
+    run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" yay
     return
   fi
 
-  run_root pacman -S "${PACMAN_ARGS[@]}" git base-devel
+  run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" git base-devel
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -366,10 +376,10 @@ ensure_yay() {
 
 install_packages() {
   log "Installing official repository packages..."
-  run_root pacman -S "${PACMAN_ARGS[@]}" "${PACMAN_PACKAGES[@]}"
+  run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" "${PACMAN_PACKAGES[@]}"
 
   log "Installing AUR packages..."
-  yay -S "${YAY_ARGS[@]}" "${AUR_PACKAGES[@]}"
+  yay -S "${YAY_INSTALL_ARGS[@]}" "${AUR_PACKAGES[@]}"
 }
 
 remove_conflicting_packages() {
@@ -413,13 +423,43 @@ remove_conflicting_packages() {
   fi
 }
 
+is_caelestia_conflicting_package() {
+  case "$1" in
+    caelestia-meta|caelestia-cli|caelestia-cli-git|caelestia-shell|caelestia-shell-git)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+remove_known_caelestia_package_conflict() {
+  local pkg="$1"
+
+  if ! is_caelestia_conflicting_package "$pkg"; then
+    return 1
+  fi
+
+  if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+    log "Skipping already removed conflict: $pkg"
+    return 0
+  fi
+
+  warn "Removing remaining conflicting Caelestia package: $pkg"
+  run_root pacman -R "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
+}
+
 remove_stale_caelestia_binary() {
   local owner=""
 
   [[ -e /usr/bin/caelestia ]] || return 0
 
   if pacman -Qo /usr/bin/caelestia >/dev/null 2>&1; then
-    owner="$(pacman -Qo /usr/bin/caelestia 2>/dev/null | awk '{print $5}')"
+    owner="$(pacman -Qqo /usr/bin/caelestia 2>/dev/null || true)"
+    if [[ -n "$owner" ]] && remove_known_caelestia_package_conflict "$owner"; then
+      return 0
+    fi
     die "/usr/bin/caelestia is owned by package '$owner'. Remove the conflicting package first and rerun the installer."
   fi
 
@@ -456,7 +496,10 @@ remove_stale_cli_python_package() {
 
   for path in "${cleanup_paths[@]}"; do
     if pacman -Qo "$path" >/dev/null 2>&1; then
-      owner="$(pacman -Qo "$path" 2>/dev/null | awk '{print $5}')"
+      owner="$(pacman -Qqo "$path" 2>/dev/null || true)"
+      if [[ -n "$owner" ]] && remove_known_caelestia_package_conflict "$owner"; then
+        continue
+      fi
       die "$path is owned by package '$owner'. Remove the conflicting package first and rerun the installer."
     fi
   done
@@ -505,9 +548,17 @@ update_or_clone_repo() {
     origin_url="$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)"
 
     if [[ "$origin_url" != "$repo_url" ]]; then
+      if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+        warn "$label repo at $repo_dir has a different origin: $origin_url"
+        warn "$label repo also has local changes, so its remote will not be rewritten automatically."
+        warn "Back up or clean the checkout, or point ${label^^}_REPO_URL to the repo you want."
+        return
+      fi
+
       warn "$label repo at $repo_dir has a different origin: $origin_url"
-      warn "Using the existing checkout without changing its remote."
-      return
+      warn "Repointing it to the configured repo: $repo_url"
+      git -C "$repo_dir" remote set-url origin "$repo_url"
+      origin_url="$repo_url"
     fi
 
     if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
@@ -521,7 +572,7 @@ update_or_clone_repo() {
       return
     fi
 
-    log "Updating $label repo in $repo_dir"
+    log "Updating $label repo in $repo_dir from $repo_url"
     git -C "$repo_dir" fetch --tags --prune origin
     git -C "$repo_dir" pull --ff-only --tags origin "$branch"
     if git -C "$repo_dir" submodule status >/dev/null 2>&1; then
@@ -535,7 +586,7 @@ update_or_clone_repo() {
   fi
 
   mkdir -p "$(dirname "$repo_dir")"
-  log "Cloning $label repo into $repo_dir"
+  log "Cloning $label repo into $repo_dir from $repo_url"
   git clone "$repo_url" "$repo_dir"
   if git -C "$repo_dir" submodule status >/dev/null 2>&1; then
     git -C "$repo_dir" submodule update --init --recursive
@@ -556,7 +607,8 @@ repo_version_for_cmake() {
   commit_count="$(git -C "$repo_dir" rev-list --count HEAD 2>/dev/null || true)"
   [[ -n "$commit_count" ]] || commit_count="0"
 
-  warn "No git tags found in $repo_dir, using fallback version 0.0.$commit_count"
+  printf '\033[1;36m:: %s\033[0m\n' \
+    "No git tags found in $repo_dir, using fallback version 0.0.$commit_count" >&2
   printf '0.0.%s\n' "$commit_count"
 }
 
@@ -675,7 +727,7 @@ initialize_caelestia() {
 
 install_spotify() {
   log "Installing Spotify + Spicetify integration..."
-  yay -S "${YAY_ARGS[@]}" spotify spicetify-cli spicetify-marketplace-bin
+  yay -S "${YAY_INSTALL_ARGS[@]}" spotify spicetify-cli spicetify-marketplace-bin
 
   run_root chmod a+wr /opt/spotify
   run_root chmod a+wr /opt/spotify/Apps -R
@@ -699,12 +751,12 @@ install_vscode() {
   log "Installing editor integration for $variant..."
 
   if [[ "$variant" == "code" ]]; then
-    run_root pacman -S "${PACMAN_ARGS[@]}" code
+    run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" code
     program="code"
     folder="$XDG_CONFIG_HOME/Code/User"
     flags_target="$XDG_CONFIG_HOME/code-flags.conf"
   else
-    yay -S "${YAY_ARGS[@]}" vscodium-bin vscodium-bin-marketplace
+    yay -S "${YAY_INSTALL_ARGS[@]}" vscodium-bin vscodium-bin-marketplace
     program="codium"
     folder="$XDG_CONFIG_HOME/VSCodium/User"
     flags_target="$XDG_CONFIG_HOME/codium-flags.conf"
@@ -732,7 +784,7 @@ install_zen() {
   local profiles=()
 
   log "Installing Zen Browser integration..."
-  yay -S "${YAY_ARGS[@]}" zen-browser-bin
+  yay -S "${YAY_INSTALL_ARGS[@]}" zen-browser-bin
 
   mkdir -p "$hosts_dir" "$lib_dir"
 
@@ -763,8 +815,8 @@ install_zen() {
 
 install_discord() {
   log "Installing Discord integration..."
-  run_root pacman -S "${PACMAN_ARGS[@]}" discord
-  yay -S "${YAY_ARGS[@]}" equicord-installer-bin
+  run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" discord
+  yay -S "${YAY_INSTALL_ARGS[@]}" equicord-installer-bin
 
   if command -v Equilotl >/dev/null 2>&1; then
     run_root Equilotl -install -location /opt/discord || true
