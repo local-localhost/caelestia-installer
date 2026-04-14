@@ -549,10 +549,7 @@ update_or_clone_repo() {
 
     if [[ "$origin_url" != "$repo_url" ]]; then
       if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
-        warn "$label repo at $repo_dir has a different origin: $origin_url"
-        warn "$label repo also has local changes, so its remote will not be rewritten automatically."
-        warn "Back up or clean the checkout, or point ${label^^}_REPO_URL to the repo you want."
-        return
+        die "$label repo at $repo_dir has origin '$origin_url' and local changes. Refusing to install from an unmanaged checkout. Back up or clean the repo, or point ${label^^}_REPO_URL to the repo you want."
       fi
 
       warn "$label repo at $repo_dir has a different origin: $origin_url"
@@ -562,14 +559,12 @@ update_or_clone_repo() {
     fi
 
     if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
-      warn "$label repo has local changes, skipping git pull: $repo_dir"
-      return
+      die "$label repo at $repo_dir has local changes. Refusing to install from a dirty checkout because the installer must use the configured fork at $repo_url."
     fi
 
     branch="$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD || true)"
     if [[ -z "$branch" ]]; then
-      warn "$label repo is not on a branch, skipping git pull: $repo_dir"
-      return
+      die "$label repo at $repo_dir is not on a branch. Refusing to install from a detached checkout because the installer must track the configured fork at $repo_url."
     fi
 
     log "Updating $label repo in $repo_dir from $repo_url"
