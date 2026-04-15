@@ -16,34 +16,41 @@ cd caelestia-installer
 bash install.sh
 ```
 
-## Non-interactive install
+Installer have 2 choice:
 
-```sh
-bash install.sh -y
-```
+- Manual confirmations
+- Automatic mode
+
 
 ## Optional components
 
 ```sh
-bash install.sh -y --spotify --vscode codium --discord --zen
+bash install.sh --spotify --vscode codium --discord --zen
 ```
 
-## What it manages
+## Subcommands
 
-- Clones or updates the managed `caelestia`, `cli`, and `shell` repositories
-- Installs required packages
-- Builds and installs the CLI and shell from source
-- Symlinks the dotfiles into XDG-aware locations
-- Initializes first-run Caelestia state files
+```text
+install     Full install flow
+check       Preflight checks only
+deps        Install package dependencies only
+repos       Clone or update managed repositories only
+build       Build and install the CLI and shell only
+link        Link managed dotfiles only
+init        Initialize first-run state only
+diagnose    Print installer diagnostics
+uninstall   Best-effort uninstall of files installed by this script
+```
 
-By default the managed checkouts live in:
+Examples:
 
-- `DOTFILES_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/caelestia`
-- `CLI_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/caelestia-cli`
-- `SHELL_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/caelestia`
-
-All of those locations can be overridden through environment variables before
-running the installer.
+```sh
+bash install.sh check
+bash install.sh repos
+bash install.sh build
+bash install.sh link
+bash install.sh init
+```
 
 ## Options
 

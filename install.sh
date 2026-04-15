@@ -8,6 +8,7 @@ PKG_DIR="$SCRIPT_DIR/pkg"
 
 REPO_OWNER="${REPO_OWNER:-local-localhost}"
 GITHUB_REPO_BASE="https://github.com/$REPO_OWNER"
+SYSTEM_PYTHON="${SYSTEM_PYTHON:-/usr/bin/python}"
 
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -21,6 +22,11 @@ DOTFILES_REPO_URL="${DOTFILES_REPO_URL:-$GITHUB_REPO_BASE/caelestia.git}"
 CLI_REPO_URL="${CLI_REPO_URL:-$GITHUB_REPO_BASE/cli.git}"
 SHELL_REPO_URL="${SHELL_REPO_URL:-$GITHUB_REPO_BASE/shell.git}"
 
+DOTFILES_REPO_REF="${DOTFILES_REPO_REF:-main}"
+CLI_REPO_REF="${CLI_REPO_REF:-main}"
+SHELL_REPO_REF="${SHELL_REPO_REF:-main}"
+
+SUBCOMMAND="install"
 YES=false
 INSTALL_SPOTIFY=false
 INSTALL_DISCORD=false
@@ -44,21 +50,47 @@ AUR_PACKAGES=()
 
 usage() {
   cat <<EOF
-Usage: $SCRIPT_NAME [options]
+Usage: $SCRIPT_NAME [subcommand] [options]
 
 Installer for the Caelestia dotfiles
 
+Subcommands:
+  install              Run the full installation flow (default)
+  check                Run preflight checks only
+  deps                 Install package dependencies only
+  repos                Clone or update managed repositories only
+  build                Build and install the CLI and shell only
+  link                 Link managed dotfiles only
+  init                 Initialize first-run Caelestia state only
+  diagnose             Print local installer diagnostics
+  uninstall            Best-effort uninstall of files installed by this script
+
 Options:
   -h, --help            Show this help text
-  -y, --yes             Non-interactive mode where possible
+  -y, --yes             Automatic mode without confirmation prompts
   --spotify             Install Spotify + Spicetify integration
   --discord             Install Discord + OpenAsar + Equicord
   --zen                 Install Zen Browser integration
   --vscode <variant>    Install editor integration. Variant: code | codium
 
+Environment overrides:
+  REPO_OWNER            GitHub owner for managed repos (default: local-localhost)
+  DOTFILES_REPO_URL     Override the dotfiles repo URL
+  CLI_REPO_URL          Override the CLI repo URL
+  SHELL_REPO_URL        Override the shell repo URL
+  DOTFILES_REPO_REF     Managed dotfiles ref to install (default: main)
+  CLI_REPO_REF          Managed CLI ref to install (default: main)
+  SHELL_REPO_REF        Managed shell ref to install (default: main)
+  DOTFILES_DIR          Override the managed dotfiles checkout directory
+  CLI_DIR               Override the managed CLI checkout directory
+  SHELL_DIR             Override the managed shell checkout directory
+  SYSTEM_PYTHON         Python used for CLI build/install cleanup (default: /usr/bin/python)
 
 Examples:
   ./$SCRIPT_NAME
+  ./$SCRIPT_NAME check
+  ./$SCRIPT_NAME repos
+  ./$SCRIPT_NAME build --vscode codium
   ./$SCRIPT_NAME -y --spotify --vscode codium --zen --discord
 EOF
 }
@@ -80,8 +112,8 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
-python_purelib_dir() {
-  python - <<'PY'
+system_python_purelib_dir() {
+  "$SYSTEM_PYTHON" - <<'PY'
 import sysconfig
 print(sysconfig.get_paths()["purelib"])
 PY
@@ -113,7 +145,7 @@ run_root() {
 }
 
 cleanup() {
-  local tmp_dir=""
+  local tmp_path=""
 
   if [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
     kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
@@ -121,8 +153,8 @@ cleanup() {
     SUDO_KEEPALIVE_PID=""
   fi
 
-  for tmp_dir in "${TEMP_DIRS[@]}"; do
-    [[ -n "$tmp_dir" && -e "$tmp_dir" ]] && rm -rf -- "$tmp_dir"
+  for tmp_path in "${TEMP_DIRS[@]}"; do
+    [[ -n "$tmp_path" && -e "$tmp_path" ]] && rm -rf -- "$tmp_path"
   done
   TEMP_DIRS=()
 
@@ -137,7 +169,7 @@ acquire_lock() {
   flock -n 9 || die "Another caelestia-installer process is already running."
 }
 
-register_temp_dir() {
+register_temp_path() {
   TEMP_DIRS+=( "$1" )
 }
 
@@ -161,6 +193,7 @@ load_package_lists() {
 
 confirm() {
   local prompt="$1"
+  local reply=""
 
   if $YES; then
     return 0
@@ -257,8 +290,15 @@ write_text_if_missing() {
 }
 
 parse_args() {
+  local subcommand_seen=false
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      install|check|deps|repos|build|link|init|diagnose|uninstall)
+        $subcommand_seen && die "Subcommand already specified: $SUBCOMMAND"
+        SUBCOMMAND="$1"
+        subcommand_seen=true
+        ;;
       -h|--help)
         usage
         exit 0
@@ -314,6 +354,7 @@ setup_package_args() {
 
 require_supported_os() {
   [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release"
+  # shellcheck disable=SC1091
   source /etc/os-release
 
   OS_ID="${ID:-}"
@@ -328,6 +369,67 @@ require_supported_os() {
 
 ensure_not_root() {
   [[ "$EUID" -ne 0 ]] || die "Run this installer as a regular user, not as root."
+}
+
+subcommand_is_mutating() {
+  case "$1" in
+    install|deps|repos|build|link|init|uninstall)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+subcommand_needs_sudo() {
+  case "$1" in
+    install|deps|build|uninstall)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+choose_confirmation_mode() {
+  local reply=""
+
+  if ! subcommand_is_mutating "$SUBCOMMAND"; then
+    return
+  fi
+
+  if $YES; then
+    return
+  fi
+
+  if [[ ! -t 0 ]]; then
+    warn "No interactive terminal detected. Falling back to automatic mode."
+    YES=true
+    return
+  fi
+
+  printf '\n'
+  printf 'Choose execution mode:\n'
+  printf '  1. Manual confirmations (recommended)\n'
+  printf '  2. Automatic mode\n'
+  read -r -p "Select mode [1/2]: " reply
+
+  case "$reply" in
+    2)
+      YES=true
+      log "Automatic mode selected."
+      ;;
+    ""|1)
+      YES=false
+      log "Manual confirmation mode selected."
+      ;;
+    *)
+      warn "Unknown selection '$reply'. Falling back to manual confirmation mode."
+      YES=false
+      ;;
+  esac
 }
 
 ensure_sudo() {
@@ -361,17 +463,160 @@ ensure_yay() {
   fi
 
   run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" git base-devel
+  need_cmd makepkg
 
-  local tmp_dir
+  local tmp_dir=""
   tmp_dir="$(mktemp -d)"
-  register_temp_dir "$tmp_dir"
+  register_temp_path "$tmp_dir"
 
   git clone --depth 1 https://aur.archlinux.org/yay.git "$tmp_dir/yay"
   (
     cd "$tmp_dir/yay"
     makepkg -si "${MAKEPKG_ARGS[@]}"
   )
-  rm -rf -- "$tmp_dir"
+}
+
+preflight_check_command() {
+  local command_name="$1"
+  local display_name="$2"
+  local -n missing_ref="$3"
+
+  if [[ "$command_name" == /* ]]; then
+    [[ -x "$command_name" ]] || missing_ref+=("$display_name ($command_name)")
+    return
+  fi
+
+  command -v "$command_name" >/dev/null 2>&1 || missing_ref+=("$display_name")
+}
+
+preflight_check_repo_access() {
+  local repo_url="$1"
+  local display_name="$2"
+  local -n missing_ref="$3"
+
+  git ls-remote "$repo_url" HEAD >/dev/null 2>&1 || missing_ref+=("$display_name ($repo_url)")
+}
+
+preflight_check_pacman_packages() {
+  local -n missing_ref="$1"
+  local pkg=""
+
+  for pkg in "${PACMAN_PACKAGES[@]}"; do
+    pacman -Si -- "$pkg" >/dev/null 2>&1 || missing_ref+=("$pkg")
+  done
+}
+
+preflight_check_aur_packages() {
+  local -n missing_ref="$1"
+  local pkg=""
+  local rpc_url=""
+  local response_file=""
+
+  if command -v yay >/dev/null 2>&1; then
+    for pkg in "${AUR_PACKAGES[@]}"; do
+      yay -Si -- "$pkg" >/dev/null 2>&1 || missing_ref+=("$pkg")
+    done
+    return
+  fi
+
+  rpc_url="https://aur.archlinux.org/rpc/v5/info?"
+  for pkg in "${AUR_PACKAGES[@]}"; do
+    rpc_url+="arg[]=$pkg&"
+  done
+
+  response_file="$(mktemp)"
+  register_temp_path "$response_file"
+  curl -fsSL "$rpc_url" -o "$response_file" || die "Failed to query the AUR RPC endpoint during preflight."
+
+  mapfile -t missing_ref < <(
+    "$SYSTEM_PYTHON" - "$response_file" "${AUR_PACKAGES[@]}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+found = {entry.get("Name") for entry in data.get("results", [])}
+
+for pkg in sys.argv[2:]:
+    if pkg not in found:
+        print(pkg)
+PY
+  )
+}
+
+run_preflight() {
+  local missing_commands=()
+  local missing_repos=()
+  local missing_pacman_packages=()
+  local missing_aur_packages=()
+  local base_commands=(bash sed diff cmp flock git readlink ln find)
+  local pkg_commands=(pacman sudo curl)
+  local build_commands=(cmake)
+  local cmd=""
+
+  log "Running preflight checks for '$SUBCOMMAND'..."
+
+  for cmd in "${base_commands[@]}"; do
+    preflight_check_command "$cmd" "$cmd" missing_commands
+  done
+
+  if subcommand_is_mutating "$SUBCOMMAND" || [[ "$SUBCOMMAND" == "check" ]]; then
+    for cmd in "${pkg_commands[@]}"; do
+      preflight_check_command "$cmd" "$cmd" missing_commands
+    done
+  fi
+
+  if [[ "$SUBCOMMAND" =~ ^(install|build|check|diagnose)$ ]]; then
+    for cmd in "${build_commands[@]}"; do
+      preflight_check_command "$cmd" "$cmd" missing_commands
+    done
+    preflight_check_command "$SYSTEM_PYTHON" "system python" missing_commands
+  fi
+
+  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] && ! command -v yay >/dev/null 2>&1; then
+    if [[ "$OS_ID" != "cachyos" ]]; then
+      preflight_check_command "makepkg" "makepkg" missing_commands
+    fi
+    warn "yay not found. It will be bootstrapped during installation."
+  fi
+
+  if [[ "$SUBCOMMAND" =~ ^(install|repos|build|link|check)$ ]]; then
+    preflight_check_repo_access "$DOTFILES_REPO_URL" "dotfiles repo" missing_repos
+    preflight_check_repo_access "$CLI_REPO_URL" "CLI repo" missing_repos
+    preflight_check_repo_access "$SHELL_REPO_URL" "shell repo" missing_repos
+  fi
+
+  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]]; then
+    preflight_check_pacman_packages missing_pacman_packages
+    preflight_check_aur_packages missing_aur_packages
+  fi
+
+  if ((${#missing_commands[@]} > 0)); then
+    warn "Missing commands:"
+    printf '  - %s\n' "${missing_commands[@]}" >&2
+  fi
+
+  if ((${#missing_repos[@]} > 0)); then
+    warn "Unavailable managed repositories:"
+    printf '  - %s\n' "${missing_repos[@]}" >&2
+  fi
+
+  if ((${#missing_pacman_packages[@]} > 0)); then
+    warn "Unavailable pacman packages:"
+    printf '  - %s\n' "${missing_pacman_packages[@]}" >&2
+  fi
+
+  if ((${#missing_aur_packages[@]} > 0)); then
+    warn "Unavailable AUR packages:"
+    printf '  - %s\n' "${missing_aur_packages[@]}" >&2
+  fi
+
+  if ((${#missing_commands[@]} > 0 || ${#missing_repos[@]} > 0 || ${#missing_pacman_packages[@]} > 0 || ${#missing_aur_packages[@]} > 0)); then
+    die "Preflight checks failed. Resolve the issues above before continuing."
+  fi
+
+  log "Preflight checks passed."
 }
 
 install_packages() {
@@ -475,11 +720,9 @@ remove_stale_cli_python_package() {
   local path=""
   local dist_info=()
 
-  if ! command -v python >/dev/null 2>&1; then
-    return 0
-  fi
+  [[ -x "$SYSTEM_PYTHON" ]] || die "System Python not found: $SYSTEM_PYTHON"
 
-  purelib="$(python_purelib_dir)"
+  purelib="$(system_python_purelib_dir)"
   [[ -n "$purelib" ]] || die "Could not determine Python site-packages directory."
 
   package_dir="$purelib/caelestia"
@@ -509,18 +752,31 @@ remove_stale_cli_python_package() {
 }
 
 remove_old_dependency_conflicts() {
-  local pkg=""
   local cleanup_list=(
     quickshell
     qtengine
     qtengine-bin
   )
+  local installed_conflicts=()
+  local pkg=""
 
   for pkg in "${cleanup_list[@]}"; do
-    if ! pacman -Qq | grep -Fxq "$pkg"; then
-      continue
+    if pacman -Q "$pkg" >/dev/null 2>&1; then
+      installed_conflicts+=( "$pkg" )
     fi
+  done
 
+  if ((${#installed_conflicts[@]} == 0)); then
+    return
+  fi
+
+  warn "Detected shared packages that may conflict with the managed Caelestia build: ${installed_conflicts[*]}"
+  if ! confirm "Remove these shared packages now?"; then
+    warn "Skipping shared package removal at user request."
+    return
+  fi
+
+  for pkg in "${installed_conflicts[@]}"; do
     warn "Removing conflicting package: $pkg"
     if ! run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" "$pkg"; then
       warn "Regular removal failed for $pkg, trying a forced dependency cleanup."
@@ -540,9 +796,10 @@ cleanup_old_install_state() {
 update_or_clone_repo() {
   local repo_dir="$1"
   local repo_url="$2"
-  local label="$3"
+  local repo_ref="$3"
+  local label="$4"
   local origin_url=""
-  local branch=""
+  local current_branch=""
 
   if [[ -e "$repo_dir" ]] && git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     origin_url="$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)"
@@ -555,21 +812,29 @@ update_or_clone_repo() {
       warn "$label repo at $repo_dir has a different origin: $origin_url"
       warn "Repointing it to the configured repo: $repo_url"
       git -C "$repo_dir" remote set-url origin "$repo_url"
-      origin_url="$repo_url"
     fi
 
     if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
       die "$label repo at $repo_dir has local changes. Refusing to install from a dirty checkout because the installer must use the configured fork at $repo_url."
     fi
 
-    branch="$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD || true)"
-    if [[ -z "$branch" ]]; then
-      die "$label repo at $repo_dir is not on a branch. Refusing to install from a detached checkout because the installer must track the configured fork at $repo_url."
+    log "Updating $label repo in $repo_dir from $repo_url at ref $repo_ref"
+    git -C "$repo_dir" fetch --tags --prune origin
+
+    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$repo_ref" \
+      || die "$label repo does not have origin ref '$repo_ref': $repo_url"
+
+    current_branch="$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD || true)"
+    if [[ "$current_branch" != "$repo_ref" ]]; then
+      if git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$repo_ref"; then
+        git -C "$repo_dir" checkout "$repo_ref"
+      else
+        git -C "$repo_dir" checkout -b "$repo_ref" --track "origin/$repo_ref"
+      fi
     fi
 
-    log "Updating $label repo in $repo_dir from $repo_url"
-    git -C "$repo_dir" fetch --tags --prune origin
-    git -C "$repo_dir" pull --ff-only --tags origin "$branch"
+    git -C "$repo_dir" branch --set-upstream-to "origin/$repo_ref" "$repo_ref" >/dev/null 2>&1 || true
+    git -C "$repo_dir" pull --ff-only --tags origin "$repo_ref"
     if git -C "$repo_dir" submodule status >/dev/null 2>&1; then
       git -C "$repo_dir" submodule update --init --recursive
     fi
@@ -581,11 +846,29 @@ update_or_clone_repo() {
   fi
 
   mkdir -p "$(dirname "$repo_dir")"
-  log "Cloning $label repo into $repo_dir from $repo_url"
-  git clone "$repo_url" "$repo_dir"
+  log "Cloning $label repo into $repo_dir from $repo_url at ref $repo_ref"
+  git clone --branch "$repo_ref" --single-branch "$repo_url" "$repo_dir"
   if git -C "$repo_dir" submodule status >/dev/null 2>&1; then
     git -C "$repo_dir" submodule update --init --recursive
   fi
+}
+
+sync_dotfiles_repo() {
+  update_or_clone_repo "$DOTFILES_DIR" "$DOTFILES_REPO_URL" "$DOTFILES_REPO_REF" "dotfiles"
+}
+
+sync_cli_repo() {
+  update_or_clone_repo "$CLI_DIR" "$CLI_REPO_URL" "$CLI_REPO_REF" "CLI"
+}
+
+sync_shell_repo() {
+  update_or_clone_repo "$SHELL_DIR" "$SHELL_REPO_URL" "$SHELL_REPO_REF" "shell"
+}
+
+sync_managed_repos() {
+  sync_dotfiles_repo
+  sync_cli_repo
+  sync_shell_repo
 }
 
 repo_version_for_cmake() {
@@ -609,15 +892,15 @@ repo_version_for_cmake() {
 
 install_cli() {
   log "Installing caelestia-cli from source..."
-  update_or_clone_repo "$CLI_DIR" "$CLI_REPO_URL" "CLI"
+  sync_cli_repo
   remove_stale_caelestia_binary
   remove_stale_cli_python_package
 
   (
     cd "$CLI_DIR"
     rm -f dist/*.whl
-    python -m build --wheel --no-isolation
-    run_root python -m installer dist/*.whl
+    "$SYSTEM_PYTHON" -m build --wheel --no-isolation
+    run_root "$SYSTEM_PYTHON" -m installer dist/*.whl
     run_root install -Dm644 completions/caelestia.fish /usr/share/fish/vendor_completions.d/caelestia.fish
   )
 }
@@ -627,7 +910,7 @@ install_shell() {
   local revision=""
 
   log "Installing caelestia-shell from source..."
-  update_or_clone_repo "$SHELL_DIR" "$SHELL_REPO_URL" "shell"
+  sync_shell_repo
   version="$(repo_version_for_cmake "$SHELL_DIR")"
   revision="$(git -C "$SHELL_DIR" rev-parse HEAD)"
 
@@ -668,7 +951,7 @@ install_dotfiles() {
   local hypr_scripts=()
 
   log "Installing dotfiles..."
-  update_or_clone_repo "$DOTFILES_DIR" "$DOTFILES_REPO_URL" "dotfiles"
+  sync_dotfiles_repo
 
   link_path "$DOTFILES_DIR/hypr" "$XDG_CONFIG_HOME/hypr"
   link_path "$DOTFILES_DIR/foot" "$XDG_CONFIG_HOME/foot"
@@ -823,35 +1106,97 @@ install_discord() {
   yay -Rns "${PACMAN_REMOVE_ARGS[@]}" equicord-installer-bin || true
 }
 
-print_summary() {
-  cat <<EOF
-
-Installation complete.
-
-Next recommended steps:
-  1. If you use a login manager, configure and enable it separately
-  2. Log into hyprland
-  3. Run 'nwg-displays' and set your monitor layout
-
-If any existing config paths were replaced, backups are in:
-  ${BACKUP_DIR:-No backups were needed}
-EOF
+path_owned_by_package() {
+  pacman -Qo "$1" >/dev/null 2>&1
 }
 
-main() {
-  parse_args "$@"
-  ensure_not_root
-  load_package_lists
-  setup_package_args
-  require_supported_os
-  trap cleanup EXIT INT TERM
-  export PACMAN_AUTH="${PACMAN_AUTH:-sudo}"
-  ensure_sudo
-  acquire_lock
+remove_unowned_path() {
+  local path="$1"
+  local owner=""
 
-  log "Preparing installation for $OS_ID"
+  [[ -e "$path" || -L "$path" ]] || return 0
 
-  if ! confirm "Continue with the installation?"; then
+  if path_owned_by_package "$path"; then
+    owner="$(pacman -Qqo "$path" 2>/dev/null || true)"
+    warn "Skipping package-owned path during uninstall: $path${owner:+ (owner: $owner)}"
+    return 0
+  fi
+
+  run_root rm -rf -- "$path"
+  log "Removed $path"
+}
+
+remove_link_if_points_to() {
+  local target_path="$1"
+  local source_path="$2"
+  local resolved_target=""
+  local resolved_source=""
+
+  [[ -L "$target_path" ]] || return 0
+
+  resolved_target="$(readlink -f "$target_path" 2>/dev/null || true)"
+  resolved_source="$(readlink -f "$source_path" 2>/dev/null || true)"
+
+  if [[ -n "$resolved_source" && "$resolved_target" == "$resolved_source" ]]; then
+    rm -f -- "$target_path"
+    log "Removed managed symlink: $target_path"
+  fi
+}
+
+uninstall_shell() {
+  local manifest="$SHELL_DIR/build/install_manifest.txt"
+  local installed_path=""
+
+  [[ -r "$manifest" ]] || {
+    warn "Shell install manifest not found at $manifest. Skipping shell uninstall."
+    return
+  }
+
+  while IFS= read -r installed_path; do
+    [[ -n "$installed_path" ]] || continue
+    remove_unowned_path "$installed_path"
+  done < "$manifest"
+}
+
+uninstall_cli() {
+  local installed_paths=()
+  local installed_path=""
+
+  mapfile -t installed_paths < <(
+    "$SYSTEM_PYTHON" - <<'PY'
+import importlib.metadata
+import sys
+
+try:
+    dist = importlib.metadata.distribution("caelestia")
+except importlib.metadata.PackageNotFoundError:
+    sys.exit(0)
+
+for file in dist.files or []:
+    print(dist.locate_file(file))
+PY
+  )
+
+  for installed_path in "${installed_paths[@]}"; do
+    remove_unowned_path "$installed_path"
+  done
+
+  remove_unowned_path "/usr/bin/caelestia"
+  remove_unowned_path "/usr/share/fish/vendor_completions.d/caelestia.fish"
+}
+
+uninstall_dotfiles_links() {
+  remove_link_if_points_to "$XDG_CONFIG_HOME/hypr" "$DOTFILES_DIR/hypr"
+  remove_link_if_points_to "$XDG_CONFIG_HOME/foot" "$DOTFILES_DIR/foot"
+  remove_link_if_points_to "$XDG_CONFIG_HOME/fish" "$DOTFILES_DIR/fish"
+  remove_link_if_points_to "$XDG_CONFIG_HOME/fastfetch" "$DOTFILES_DIR/fastfetch"
+  remove_link_if_points_to "$XDG_CONFIG_HOME/uwsm" "$DOTFILES_DIR/uwsm"
+  remove_link_if_points_to "$XDG_CONFIG_HOME/btop" "$DOTFILES_DIR/btop"
+  remove_link_if_points_to "$XDG_CONFIG_HOME/starship.toml" "$DOTFILES_DIR/starship.toml"
+}
+
+run_install_command() {
+  if ! confirm "Continue with the full installation?"; then
     die "Installation cancelled by user."
   fi
 
@@ -868,8 +1213,178 @@ main() {
   [[ -n "$VSCODE_VARIANT" ]] && install_vscode "$VSCODE_VARIANT"
   $INSTALL_ZEN && install_zen
   $INSTALL_DISCORD && install_discord
+}
 
-  print_summary
+run_deps_command() {
+  if ! confirm "Install package dependencies now?"; then
+    die "Dependency installation cancelled by user."
+  fi
+
+  ensure_yay
+  cleanup_old_install_state
+  install_packages
+}
+
+run_repos_command() {
+  if ! confirm "Clone or update the managed repositories now?"; then
+    die "Repository sync cancelled by user."
+  fi
+
+  sync_managed_repos
+}
+
+run_build_command() {
+  if ! confirm "Build and install the CLI and shell now?"; then
+    die "Build cancelled by user."
+  fi
+
+  install_cli
+  install_shell
+}
+
+run_link_command() {
+  if ! confirm "Link managed dotfiles now?"; then
+    die "Link step cancelled by user."
+  fi
+
+  warn_quickshell_default_config
+  install_dotfiles
+}
+
+run_init_command() {
+  if ! confirm "Initialize first-run Caelestia state now?"; then
+    die "Initialization cancelled by user."
+  fi
+
+  initialize_caelestia
+}
+
+run_uninstall_command() {
+  if ! confirm "Run a best-effort uninstall of files installed by this script?"; then
+    die "Uninstall cancelled by user."
+  fi
+
+  uninstall_shell
+  uninstall_cli
+  uninstall_dotfiles_links
+}
+
+diagnose_repo() {
+  local label="$1"
+  local repo_dir="$2"
+
+  printf '\n[%s]\n' "$label"
+  printf '  dir: %s\n' "$repo_dir"
+
+  if [[ -e "$repo_dir" ]] && git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '  origin: %s\n' "$(git -C "$repo_dir" remote get-url origin 2>/dev/null || printf 'n/a')"
+    printf '  branch: %s\n' "$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || printf 'detached')"
+    printf '  head: %s\n' "$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || printf 'n/a')"
+    printf '  status: %s\n' "$(git -C "$repo_dir" status --short --branch | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
+  else
+    printf '  status: missing or not a git repo\n'
+  fi
+}
+
+run_diagnose_command() {
+  printf 'Caelestia installer diagnostics\n'
+  printf '  subcommand: %s\n' "$SUBCOMMAND"
+  printf '  repo owner: %s\n' "$REPO_OWNER"
+  printf '  system python: %s\n' "$SYSTEM_PYTHON"
+  printf '  os id: %s\n' "$OS_ID"
+  printf '  dotfiles repo: %s @ %s\n' "$DOTFILES_REPO_URL" "$DOTFILES_REPO_REF"
+  printf '  cli repo: %s @ %s\n' "$CLI_REPO_URL" "$CLI_REPO_REF"
+  printf '  shell repo: %s @ %s\n' "$SHELL_REPO_URL" "$SHELL_REPO_REF"
+  printf '  dotfiles dir: %s\n' "$DOTFILES_DIR"
+  printf '  cli dir: %s\n' "$CLI_DIR"
+  printf '  shell dir: %s\n' "$SHELL_DIR"
+  printf '\n'
+  printf 'Commands:\n'
+  printf '  sudo: %s\n' "$(command -v sudo 2>/dev/null || printf 'missing')"
+  printf '  git: %s\n' "$(command -v git 2>/dev/null || printf 'missing')"
+  printf '  pacman: %s\n' "$(command -v pacman 2>/dev/null || printf 'missing')"
+  printf '  yay: %s\n' "$(command -v yay 2>/dev/null || printf 'missing')"
+  printf '  cmake: %s\n' "$(command -v cmake 2>/dev/null || printf 'missing')"
+  printf '  python: %s\n' "$(command -v "$SYSTEM_PYTHON" 2>/dev/null || printf 'missing')"
+
+  diagnose_repo "dotfiles" "$DOTFILES_DIR"
+  diagnose_repo "cli" "$CLI_DIR"
+  diagnose_repo "shell" "$SHELL_DIR"
+}
+
+print_summary() {
+  cat <<EOF
+
+Operation complete.
+
+Next recommended steps:
+  1. If you use a login manager, configure and enable it separately
+  2. Log into hyprland
+  3. Run 'nwg-displays' and set your monitor layout
+
+If any existing config paths were replaced, backups are in:
+  ${BACKUP_DIR:-No backups were needed}
+EOF
+}
+
+main() {
+  parse_args "$@"
+  ensure_not_root
+  require_supported_os
+  load_package_lists
+  trap cleanup EXIT INT TERM
+  acquire_lock
+
+  run_preflight
+
+  if [[ "$SUBCOMMAND" == "check" ]]; then
+    return
+  fi
+
+  choose_confirmation_mode
+  setup_package_args
+  export PACMAN_AUTH="${PACMAN_AUTH:-sudo}"
+
+  if subcommand_needs_sudo "$SUBCOMMAND"; then
+    ensure_sudo
+  fi
+
+  case "$SUBCOMMAND" in
+    install)
+      run_install_command
+      print_summary
+      ;;
+    deps)
+      run_deps_command
+      print_summary
+      ;;
+    repos)
+      run_repos_command
+      print_summary
+      ;;
+    build)
+      run_build_command
+      print_summary
+      ;;
+    link)
+      run_link_command
+      print_summary
+      ;;
+    init)
+      run_init_command
+      print_summary
+      ;;
+    diagnose)
+      run_diagnose_command
+      ;;
+    uninstall)
+      run_uninstall_command
+      print_summary
+      ;;
+    *)
+      die "Unhandled subcommand: $SUBCOMMAND"
+      ;;
+  esac
 }
 
 main "$@"
