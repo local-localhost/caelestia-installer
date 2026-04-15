@@ -986,7 +986,8 @@ initialize_caelestia() {
 
   if command -v caelestia >/dev/null 2>&1; then
     if [[ ! -f "$XDG_STATE_HOME/caelestia/scheme.json" ]]; then
-      caelestia scheme set -n shadotheme || warn "Failed to create the initial scheme state automatically."
+      caelestia scheme set -n caelestia -f default -m dark \
+        || warn "Failed to create the initial scheme state automatically."
     fi
   else
     warn "The 'caelestia' command is not available yet, skipping scheme initialization."
