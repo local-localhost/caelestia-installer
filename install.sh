@@ -514,6 +514,7 @@ preflight_check_aur_packages() {
 
   if command -v yay >/dev/null 2>&1; then
     for pkg in "${AUR_PACKAGES[@]}"; do
+      [[ "$pkg" == "app2unit" ]] && continue
       yay -Si -- "$pkg" >/dev/null 2>&1 || missing_ref+=("$pkg")
     done
     return
@@ -521,6 +522,7 @@ preflight_check_aur_packages() {
 
   rpc_url="https://aur.archlinux.org/rpc/v5/info?"
   for pkg in "${AUR_PACKAGES[@]}"; do
+    [[ "$pkg" == "app2unit" ]] && continue
     rpc_url+="arg[]=$pkg&"
   done
 
@@ -539,6 +541,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
 found = {entry.get("Name") for entry in data.get("results", [])}
 
 for pkg in sys.argv[2:]:
+    if pkg == "app2unit":
+        continue
     if pkg not in found:
         print(pkg)
 PY
