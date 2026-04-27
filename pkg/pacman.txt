@@ -17,7 +17,6 @@ fuzzel
 git
 glib2
 gnome-keyring
-greetd-tuigreet
 grim
 gpu-screen-recorder
 hyprland
