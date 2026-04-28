@@ -118,15 +118,6 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
-on_error() {
-  local exit_code=$?
-  local line_no="${1:-unknown}"
-  local command="${2:-unknown}"
-
-  [[ "$exit_code" -eq 0 ]] && return
-  printf '\033[1;31m!! Command failed with exit code %s at line %s: %s\033[0m\n' "$exit_code" "$line_no" "$command" >&2
-}
-
 system_python_purelib_dir() {
   "$SYSTEM_PYTHON" - <<'PY'
 import sysconfig
@@ -191,6 +182,42 @@ array_contains() {
 
 run_root() {
   sudo "$@"
+}
+
+run_checked() {
+  local status=0
+  local reply=""
+
+  "$@" && return 0
+  status=$?
+
+  if $YES || [[ ! -t 0 ]]; then
+    die "Command failed with exit code $status: $*"
+  fi
+
+  while true; do
+    warn "Command failed with exit code $status: $*"
+    printf '  r. Retry this command\n' >&2
+    printf '  e. Exit installer\n' >&2
+    read -r -p "Choose action [R/e]: " reply
+
+    case "$reply" in
+      ""|r|R)
+        "$@" && return 0
+        status=$?
+        ;;
+      e|E)
+        die "Installation stopped after failed command: $*"
+        ;;
+      *)
+        warn "Please enter r or e."
+        ;;
+    esac
+  done
+}
+
+run_root_checked() {
+  run_checked sudo "$@"
 }
 
 cleanup() {
@@ -668,11 +695,11 @@ choose_optional_package_sets() {
   AUDIO_VIDEO_PACKAGES=()
   AUDIO_MODE="easyeffects"
 
-  [[ "$SUBCOMMAND" =~ ^(install|deps)$ ]] || return
+  [[ "$SUBCOMMAND" =~ ^(install|deps)$ ]] || return 0
 
   if [[ ! -t 0 ]]; then
     warn "No interactive terminal detected. Skipping optional gaming and player prompts; EasyEffects remains enabled by default."
-    return
+    return 0
   fi
 
   prompt_gaming_packages
@@ -687,7 +714,7 @@ build_install_package_lists() {
   append_unique_packages INSTALL_PACMAN_PACKAGES "${PACMAN_PACKAGES[@]}"
   append_unique_packages INSTALL_AUR_PACKAGES "${AUR_PACKAGES[@]}"
 
-  [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] || return
+  [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] || return 0
 
   if [[ "$AUDIO_MODE" == "easyeffects" ]]; then
     append_unique_packages INSTALL_PACMAN_PACKAGES "${EASYEFFECTS_PACKAGES[@]}"
@@ -700,7 +727,7 @@ build_install_package_lists() {
 ensure_sudo() {
   need_cmd sudo
   log "Requesting sudo access..."
-  sudo -v
+  sudo -v || die "Failed to obtain sudo privileges."
 
   if [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
     return
@@ -721,15 +748,15 @@ ensure_yay() {
   local makepkg_args=(-si)
 
   if command -v yay >/dev/null 2>&1; then
-    return
+    return 0
   fi
 
   log "yay not found, installing it..."
 
   if [[ "$OS_ID" == "cachyos" ]]; then
     log "cachyos detected; installing yay from system repositories."
-    run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" yay
-    return
+    run_root_checked pacman -S "${PACMAN_INSTALL_ARGS[@]}" yay
+    return 0
   fi
 
   need_cmd git
@@ -741,10 +768,10 @@ ensure_yay() {
   yay_dir="$build_root/yay-bin"
 
   log "Bootstrapping yay from the official AUR package: yay-bin"
-  git clone https://aur.archlinux.org/yay-bin.git "$yay_dir"
+  run_checked git clone https://aur.archlinux.org/yay-bin.git "$yay_dir"
   (
     cd "$yay_dir"
-    makepkg "${makepkg_args[@]}"
+    run_checked makepkg "${makepkg_args[@]}"
   )
 }
 
@@ -773,8 +800,8 @@ preflight_collect_uninstalled_packages() {
   local -n package_ref="$1"
   local -n missing_ref="$2"
 
-  ((${#package_ref[@]} > 0)) || return
-  command -v pacman >/dev/null 2>&1 || return
+  ((${#package_ref[@]} > 0)) || return 0
+  command -v pacman >/dev/null 2>&1 || return 0
 
   mapfile -t missing_ref < <(pacman -T "${package_ref[@]}" 2>/dev/null || true)
 }
@@ -792,8 +819,8 @@ preflight_check_pacman_packages() {
   local -n missing_ref="$2"
   local err_file=""
 
-  ((${#package_ref[@]} > 0)) || return
-  command -v pacman >/dev/null 2>&1 || return
+  ((${#package_ref[@]} > 0)) || return 0
+  command -v pacman >/dev/null 2>&1 || return 0
 
   err_file="$(mktemp)"
   register_temp_path "$err_file"
@@ -829,7 +856,7 @@ preflight_check_aur_packages() {
     aur_query_packages+=( "$pkg" )
   done
 
-  ((${#aur_query_packages[@]} > 0)) || return
+  ((${#aur_query_packages[@]} > 0)) || return 0
 
   if command -v curl >/dev/null 2>&1; then
     rpc_url="https://aur.archlinux.org/rpc/v5/info?"
@@ -873,7 +900,7 @@ print_package_plan() {
   local title="$1"
   shift
 
-  (($# > 0)) || return
+  (($# > 0)) || return 0
 
   log "$title"
   printf '  - %s\n' "$@"
@@ -883,7 +910,7 @@ print_preflight_failure_group() {
   local title="$1"
   shift
 
-  (($# > 0)) || return
+  (($# > 0)) || return 0
 
   warn "$title"
   printf '  - %s\n' "$@" >&2
@@ -993,7 +1020,7 @@ install_official_packages() {
       warn "Skipping system update before package installation at user request."
       pacman_action=(-S)
     fi
-    run_root pacman "${pacman_action[@]}" "${PACMAN_INSTALL_ARGS[@]}" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
+    run_root_checked pacman "${pacman_action[@]}" "${PACMAN_INSTALL_ARGS[@]}" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
   else
     log "Official repository packages are already installed."
   fi
@@ -1005,7 +1032,7 @@ install_aur_packages() {
   if ((${#MISSING_AUR_INSTALL_PACKAGES[@]} > 0)); then
     ensure_yay
     print_package_plan "Installing missing AUR packages:" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
-    yay -S "${YAY_INSTALL_ARGS[@]}" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
+    run_checked yay -S "${YAY_INSTALL_ARGS[@]}" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
   else
     log "AUR packages are already installed."
   fi
@@ -1051,7 +1078,7 @@ remove_conflicting_packages() {
       fi
 
       log "Removing conflicting package: $pkg"
-      run_root pacman -R "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
+      run_root_checked pacman -R "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
     done
   else
     die "Conflicting packaged Caelestia versions must be removed before continuing."
@@ -1082,7 +1109,7 @@ remove_known_caelestia_package_conflict() {
   fi
 
   warn "Removing remaining conflicting Caelestia package: $pkg"
-  run_root pacman -R "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
+  run_root_checked pacman -R "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
 }
 
 remove_stale_caelestia_binary() {
@@ -1099,7 +1126,7 @@ remove_stale_caelestia_binary() {
   fi
 
   warn "Removing unowned stale binary: /usr/bin/caelestia"
-  run_root rm -f /usr/bin/caelestia
+  run_root_checked rm -f /usr/bin/caelestia
 }
 
 remove_stale_cli_python_package() {
@@ -1138,7 +1165,7 @@ remove_stale_cli_python_package() {
   done
 
   warn "Removing previous manually installed caelestia Python files."
-  run_root rm -rf -- "${cleanup_paths[@]}"
+  run_root_checked rm -rf -- "${cleanup_paths[@]}"
 }
 
 remove_old_dependency_conflicts() {
@@ -1170,7 +1197,7 @@ remove_old_dependency_conflicts() {
     warn "Removing conflicting package: $pkg"
     if ! run_root pacman -Rns "${PACMAN_REMOVE_ARGS[@]}" "$pkg"; then
       warn "Regular removal failed for $pkg, trying a forced dependency cleanup."
-      run_root pacman -Rdd "${PACMAN_REMOVE_ARGS[@]}" "$pkg" || die "Failed to remove conflicting package: $pkg"
+      run_root_checked pacman -Rdd "${PACMAN_REMOVE_ARGS[@]}" "$pkg"
     fi
   done
 }
@@ -1201,7 +1228,7 @@ update_or_clone_repo() {
 
       warn "$label repo at $repo_dir has a different origin: $origin_url"
       warn "Repointing it to the configured repo: $repo_url"
-      git -C "$repo_dir" remote set-url origin "$repo_url"
+      run_checked git -C "$repo_dir" remote set-url origin "$repo_url"
     fi
 
     if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
@@ -1209,7 +1236,7 @@ update_or_clone_repo() {
     fi
 
     log "Updating $label repo in $repo_dir from $repo_url at ref $repo_ref"
-    git -C "$repo_dir" fetch --tags --prune origin
+    run_checked git -C "$repo_dir" fetch --tags --prune origin
 
     git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$repo_ref" \
       || die "$label repo does not have origin ref '$repo_ref': $repo_url"
@@ -1217,16 +1244,16 @@ update_or_clone_repo() {
     current_branch="$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD || true)"
     if [[ "$current_branch" != "$repo_ref" ]]; then
       if git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$repo_ref"; then
-        git -C "$repo_dir" checkout "$repo_ref"
+        run_checked git -C "$repo_dir" checkout "$repo_ref"
       else
-        git -C "$repo_dir" checkout -b "$repo_ref" --track "origin/$repo_ref"
+        run_checked git -C "$repo_dir" checkout -b "$repo_ref" --track "origin/$repo_ref"
       fi
     fi
 
     git -C "$repo_dir" branch --set-upstream-to "origin/$repo_ref" "$repo_ref" >/dev/null 2>&1 || true
-    git -C "$repo_dir" pull --ff-only --tags origin "$repo_ref"
+    run_checked git -C "$repo_dir" pull --ff-only --tags origin "$repo_ref"
     if git -C "$repo_dir" submodule status >/dev/null 2>&1; then
-      git -C "$repo_dir" submodule update --init --recursive
+      run_checked git -C "$repo_dir" submodule update --init --recursive
     fi
     return
   fi
@@ -1237,9 +1264,9 @@ update_or_clone_repo() {
 
   mkdir -p "$(dirname "$repo_dir")"
   log "Cloning $label repo into $repo_dir from $repo_url at ref $repo_ref"
-  git clone --branch "$repo_ref" --single-branch "$repo_url" "$repo_dir"
+  run_checked git clone --branch "$repo_ref" --single-branch "$repo_url" "$repo_dir"
   if git -C "$repo_dir" submodule status >/dev/null 2>&1; then
-    git -C "$repo_dir" submodule update --init --recursive
+    run_checked git -C "$repo_dir" submodule update --init --recursive
   fi
 }
 
@@ -1289,9 +1316,9 @@ install_cli() {
   (
     cd "$CLI_DIR"
     rm -f dist/*.whl
-    "$SYSTEM_PYTHON" -m build --wheel --no-isolation
-    run_root "$SYSTEM_PYTHON" -m installer dist/*.whl
-    run_root install -Dm644 completions/caelestia.fish /usr/share/fish/vendor_completions.d/caelestia.fish
+    run_checked "$SYSTEM_PYTHON" -m build --wheel --no-isolation
+    run_root_checked "$SYSTEM_PYTHON" -m installer dist/*.whl
+    run_root_checked install -Dm644 completions/caelestia.fish /usr/share/fish/vendor_completions.d/caelestia.fish
   )
 }
 
@@ -1306,13 +1333,13 @@ install_shell() {
 
   (
     cd "$SHELL_DIR"
-    cmake -B build -G Ninja \
+    run_checked cmake -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/ \
       -DVERSION="$version" \
       -DGIT_REVISION="$revision"
-    cmake --build build
-    run_root cmake --install build
+    run_checked cmake --build build
+    run_root_checked cmake --install build
   )
 }
 
@@ -1396,10 +1423,11 @@ initialize_caelestia() {
 
 install_spotify() {
   log "Installing Spotify + Spicetify integration..."
-  yay -S "${YAY_INSTALL_ARGS[@]}" spotify spicetify-cli spicetify-marketplace-bin
+  ensure_yay
+  run_checked yay -S "${YAY_INSTALL_ARGS[@]}" spotify spicetify-cli spicetify-marketplace-bin
 
-  run_root chmod a+wr /opt/spotify
-  run_root chmod a+wr /opt/spotify/Apps -R
+  run_root_checked chmod a+wr /opt/spotify
+  run_root_checked chmod a+wr /opt/spotify/Apps -R
 
   link_path "$DOTFILES_DIR/spicetify" "$XDG_CONFIG_HOME/spicetify"
 
@@ -1420,12 +1448,13 @@ install_vscode() {
   log "Installing editor integration for $variant..."
 
   if [[ "$variant" == "code" ]]; then
-    run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" code
+    run_root_checked pacman -S "${PACMAN_INSTALL_ARGS[@]}" code
     program="code"
     folder="$XDG_CONFIG_HOME/Code/User"
     flags_target="$XDG_CONFIG_HOME/code-flags.conf"
   else
-    yay -S "${YAY_INSTALL_ARGS[@]}" vscodium-bin vscodium-bin-marketplace
+    ensure_yay
+    run_checked yay -S "${YAY_INSTALL_ARGS[@]}" vscodium-bin vscodium-bin-marketplace
     program="codium"
     folder="$XDG_CONFIG_HOME/VSCodium/User"
     flags_target="$XDG_CONFIG_HOME/codium-flags.conf"
@@ -1453,7 +1482,8 @@ install_zen() {
   local profiles=()
 
   log "Installing Zen Browser integration..."
-  yay -S "${YAY_INSTALL_ARGS[@]}" zen-browser-bin
+  ensure_yay
+  run_checked yay -S "${YAY_INSTALL_ARGS[@]}" zen-browser-bin
 
   mkdir -p "$hosts_dir" "$lib_dir"
 
@@ -1484,8 +1514,9 @@ install_zen() {
 
 install_discord() {
   log "Installing Discord integration..."
-  run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" discord
-  yay -S "${YAY_INSTALL_ARGS[@]}" equicord-installer-bin
+  run_root_checked pacman -S "${PACMAN_INSTALL_ARGS[@]}" discord
+  ensure_yay
+  run_checked yay -S "${YAY_INSTALL_ARGS[@]}" equicord-installer-bin
 
   if command -v Equilotl >/dev/null 2>&1; then
     run_root Equilotl -install -location /opt/discord || true
@@ -1719,7 +1750,6 @@ main() {
   ensure_not_root
   require_supported_os
   load_package_lists
-  trap 'on_error $LINENO "$BASH_COMMAND"' ERR
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -1731,7 +1761,7 @@ main() {
   run_preflight
 
   if [[ "$SUBCOMMAND" == "check" ]]; then
-    return
+    return 0
   fi
 
   setup_package_args
