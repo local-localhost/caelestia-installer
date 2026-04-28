@@ -47,6 +47,9 @@ slurp
 starship
 swappy
 thunar
+gvfs
+ark
+kate
 trash-cli
 ttf-cascadia-code-nerd
 ttf-jetbrains-mono-nerd
