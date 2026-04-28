@@ -1,7 +1,6 @@
 # caelestia-installer
 
-Official installer for the full Caelestia setup. This is the supported
-end-to-end installation path for the dotfiles, CLI, and shell.
+the best caelestia dotfiles installer with improvements in shell(example - more fixes than original shell and dotfiles, improvements for nvidia, more configurable)
 
 ## Supported systems
 
@@ -33,30 +32,13 @@ bash install.sh --spotify --vscode codium --discord --zen
 ```text
 install     Full install flow
 check       Preflight checks only
-deps        Install package dependencies only
-repos       Clone or update managed repositories only
-build       Build and install the CLI and shell only
-link        Link managed dotfiles only
-init        Initialize first-run state only
-diagnose    Print installer diagnostics
 uninstall   Best-effort uninstall of files installed by this script
-```
-
-Examples:
-
-```sh
-bash install.sh check
-bash install.sh repos
-bash install.sh build
-bash install.sh link
-bash install.sh init
 ```
 
 ## Options
 
 ```text
 -h, --help
--y, --yes
 --spotify
 --discord
 --zen

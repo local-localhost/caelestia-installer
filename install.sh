@@ -32,6 +32,7 @@ INSTALL_SPOTIFY=false
 INSTALL_DISCORD=false
 INSTALL_ZEN=false
 VSCODE_VARIANT=""
+AUDIO_MODE="easyeffects"
 
 PACMAN_BOOTSTRAP_ARGS=(--needed)
 PACMAN_INSTALL_ARGS=()
@@ -47,6 +48,11 @@ SUDO_KEEPALIVE_PID=""
 TEMP_DIRS=()
 PACMAN_PACKAGES=()
 AUR_PACKAGES=()
+INSTALL_PACMAN_PACKAGES=()
+INSTALL_AUR_PACKAGES=()
+GAMING_SELECTED_PACKAGES=()
+AUDIO_VIDEO_PACKAGES=()
+EASYEFFECTS_PACKAGES=(easyeffects lsp-plugins-lv2 calf)
 
 usage() {
   cat <<EOF
@@ -67,7 +73,6 @@ Subcommands:
 
 Options:
   -h, --help            Show this help text
-  -y, --yes             Automatic mode without confirmation prompts
   --spotify             Install Spotify + Spicetify integration
   --discord             Install Discord + OpenAsar + Equicord
   --zen                 Install Zen Browser integration
@@ -91,7 +96,7 @@ Examples:
   ./$SCRIPT_NAME check
   ./$SCRIPT_NAME repos
   ./$SCRIPT_NAME build --vscode codium
-  ./$SCRIPT_NAME -y --spotify --vscode codium --zen --discord
+  ./$SCRIPT_NAME --spotify --vscode codium --zen --discord
 EOF
 }
 
@@ -140,6 +145,40 @@ default_wallpaper_dir() {
   printf '%s/Wallpapers\n' "$pictures_dir"
 }
 
+append_unique_package() {
+  local -n package_list="$1"
+  local package="$2"
+  local existing_package=""
+
+  for existing_package in "${package_list[@]}"; do
+    [[ "$existing_package" == "$package" ]] && return 0
+  done
+
+  package_list+=( "$package" )
+}
+
+append_unique_packages() {
+  local target_array="$1"
+  local package=""
+  shift
+
+  for package in "$@"; do
+    append_unique_package "$target_array" "$package"
+  done
+}
+
+array_contains() {
+  local needle="$1"
+  local item=""
+  shift
+
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+
+  return 1
+}
+
 run_root() {
   sudo "$@"
 }
@@ -162,11 +201,60 @@ cleanup() {
 }
 
 acquire_lock() {
+  local existing_pid=""
+  local reply=""
+  local attempt=0
+
   need_cmd flock
   mkdir -p "$STATE_DIR"
+  touch "$LOCK_FILE"
 
-  exec 9>"$LOCK_FILE"
-  flock -n 9 || die "Another caelestia-installer process is already running."
+  exec 9<>"$LOCK_FILE"
+  if flock -n 9; then
+    : > "$LOCK_FILE"
+    printf '%s\n' "$$" >&9
+    return
+  fi
+
+  existing_pid="$(tr -cd '0-9' < "$LOCK_FILE" || true)"
+  warn "Another caelestia-installer process is already running."
+
+  if [[ ! -t 0 ]]; then
+    die "Run interactively to decide whether to stop the previous installer."
+  fi
+
+  read -r -p "want kill? yes or no: " reply
+  case "$reply" in
+    yes|YES|y|Y)
+      ;;
+    *)
+      die "Installation cancelled because another installer is running."
+      ;;
+  esac
+
+  [[ "$existing_pid" =~ ^[0-9]+$ ]] || die "Could not determine the previous installer PID from $LOCK_FILE."
+  [[ "$existing_pid" != "$$" ]] || die "Refusing to kill the current installer process."
+
+  if kill -0 "$existing_pid" 2>/dev/null; then
+    warn "Stopping previous caelestia-installer process: $existing_pid"
+    kill "$existing_pid" 2>/dev/null || true
+
+    for attempt in {1..20}; do
+      kill -0 "$existing_pid" 2>/dev/null || break
+      sleep 0.25
+    done
+
+    if kill -0 "$existing_pid" 2>/dev/null; then
+      warn "Previous installer did not exit after SIGTERM; sending SIGKILL."
+      kill -KILL "$existing_pid" 2>/dev/null || true
+    fi
+  else
+    warn "Previous installer PID $existing_pid is no longer running; retrying lock acquisition."
+  fi
+
+  flock -n 9 || die "Another caelestia-installer process is still holding the lock."
+  : > "$LOCK_FILE"
+  printf '%s\n' "$$" >&9
 }
 
 register_temp_path() {
@@ -303,9 +391,6 @@ parse_args() {
         usage
         exit 0
         ;;
-      -y|--yes)
-        YES=true
-        ;;
       --spotify)
         INSTALL_SPOTIFY=true
         ;;
@@ -359,7 +444,7 @@ require_supported_os() {
 
   OS_ID="${ID:-}"
   case "$OS_ID" in
-    arch|cachyos)
+    arch|cachyos|endeavouros)
       ;;
     *)
       die "Unsupported distribution: ${OS_ID:-unknown}. This installer supports only Arch Linux"
@@ -400,10 +485,6 @@ choose_confirmation_mode() {
     return
   fi
 
-  if $YES; then
-    return
-  fi
-
   if [[ ! -t 0 ]]; then
     warn "No interactive terminal detected. Falling back to automatic mode."
     YES=true
@@ -430,6 +511,177 @@ choose_confirmation_mode() {
       YES=false
       ;;
   esac
+}
+
+prompt_gaming_packages() {
+  local gaming_choices=""
+  local choice=""
+  local invalid_choice=false
+
+  while true; do
+    printf '\n'
+    printf -- '--- Gaming package selection ---\n'
+    printf 'Gaming Packages:\n'
+    printf '  1. steam\n'
+    printf '  2. wine\n'
+    printf '  3. winetricks\n'
+    printf '  4. protontricks\n'
+    printf '  5. lutris\n'
+    printf '  6. prismlauncher\n'
+    printf '  a. Install all gaming packages\n'
+    printf '  0. Skip gaming package installation\n'
+    printf '\n'
+    read -r -p "Enter your choices (comma or space separated, e.g., 1,2,5 or 1 2 5, or a for all): " gaming_choices
+
+    if [[ "$gaming_choices" == "0" || -z "$gaming_choices" ]]; then
+      GAMING_SELECTED_PACKAGES=()
+      log "Skipping gaming package installation."
+      return
+    fi
+
+    if [[ "$gaming_choices" =~ ^[aA]$ ]]; then
+      gaming_choices="1 2 3 4 5 6"
+    fi
+
+    gaming_choices="${gaming_choices//,/ }"
+    GAMING_SELECTED_PACKAGES=()
+    invalid_choice=false
+
+    for choice in $gaming_choices; do
+      case "$choice" in
+        1) append_unique_package GAMING_SELECTED_PACKAGES steam ;;
+        2) append_unique_package GAMING_SELECTED_PACKAGES wine ;;
+        3) append_unique_package GAMING_SELECTED_PACKAGES winetricks ;;
+        4) append_unique_package GAMING_SELECTED_PACKAGES protontricks ;;
+        5) append_unique_package GAMING_SELECTED_PACKAGES lutris ;;
+        6) append_unique_package GAMING_SELECTED_PACKAGES prismlauncher ;;
+        *)
+          warn "Invalid choice: $choice"
+          invalid_choice=true
+          ;;
+      esac
+    done
+
+    if ! $invalid_choice; then
+      log "Selected gaming packages: ${GAMING_SELECTED_PACKAGES[*]}"
+      return
+    fi
+
+    warn "Please try again with valid choices."
+  done
+}
+
+prompt_audio_mode() {
+  local audio_choice=""
+
+  while true; do
+    printf '\n'
+    printf -- '--- Audio mode selection ---\n'
+    printf 'Audio setup option:\n'
+    printf '  1. skip\n'
+    printf '  2. EasyEffects (default)\n'
+    read -r -p "Choose audio option [1/2]: " audio_choice
+
+    case "$audio_choice" in
+      1)
+        AUDIO_MODE="none"
+        log "Skipping EasyEffects installation."
+        return
+        ;;
+      ""|2)
+        AUDIO_MODE="easyeffects"
+        log "EasyEffects will be installed."
+        return
+        ;;
+      *)
+        warn "Please enter 1 or 2."
+        ;;
+    esac
+  done
+}
+
+prompt_audio_video_players() {
+  local av_choices=""
+  local choice=""
+  local invalid_choice=false
+
+  while true; do
+    printf '\n'
+    printf -- '--- Audio/Video player selection ---\n'
+    printf 'Audio/Video Players:\n'
+    printf '  1. mpv (lightweight video player)\n'
+    printf '  2. vlc (versatile media player)\n'
+    printf '  a. Install all audio/video players\n'
+    printf '  0. Skip audio/video player installation\n'
+    printf '\n'
+    read -r -p "Enter your choices (comma or space separated, e.g., 1,2 or 1 2, or a for all): " av_choices
+
+    if [[ "$av_choices" == "0" || -z "$av_choices" ]]; then
+      AUDIO_VIDEO_PACKAGES=()
+      log "Skipping audio/video player installation."
+      return
+    fi
+
+    if [[ "$av_choices" =~ ^[aA]$ ]]; then
+      av_choices="1 2"
+    fi
+
+    av_choices="${av_choices//,/ }"
+    AUDIO_VIDEO_PACKAGES=()
+    invalid_choice=false
+
+    for choice in $av_choices; do
+      case "$choice" in
+        1) append_unique_package AUDIO_VIDEO_PACKAGES mpv ;;
+        2) append_unique_package AUDIO_VIDEO_PACKAGES vlc ;;
+        *)
+          warn "Invalid choice: $choice"
+          invalid_choice=true
+          ;;
+      esac
+    done
+
+    if ! $invalid_choice; then
+      log "Selected audio/video packages: ${AUDIO_VIDEO_PACKAGES[*]}"
+      return
+    fi
+
+    warn "Please try again with valid choices."
+  done
+}
+
+choose_optional_package_sets() {
+  GAMING_SELECTED_PACKAGES=()
+  AUDIO_VIDEO_PACKAGES=()
+  AUDIO_MODE="easyeffects"
+
+  [[ "$SUBCOMMAND" =~ ^(install|deps)$ ]] || return
+
+  if [[ ! -t 0 ]]; then
+    warn "No interactive terminal detected. Skipping optional gaming and player prompts; EasyEffects remains enabled by default."
+    return
+  fi
+
+  prompt_gaming_packages
+  prompt_audio_mode
+  prompt_audio_video_players
+}
+
+build_install_package_lists() {
+  INSTALL_PACMAN_PACKAGES=()
+  INSTALL_AUR_PACKAGES=()
+
+  append_unique_packages INSTALL_PACMAN_PACKAGES "${PACMAN_PACKAGES[@]}"
+  append_unique_packages INSTALL_AUR_PACKAGES "${AUR_PACKAGES[@]}"
+
+  [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] || return
+
+  if [[ "$AUDIO_MODE" == "easyeffects" ]]; then
+    append_unique_packages INSTALL_PACMAN_PACKAGES "${EASYEFFECTS_PACKAGES[@]}"
+  fi
+
+  append_unique_packages INSTALL_PACMAN_PACKAGES "${GAMING_SELECTED_PACKAGES[@]}"
+  append_unique_packages INSTALL_PACMAN_PACKAGES "${AUDIO_VIDEO_PACKAGES[@]}"
 }
 
 ensure_sudo() {
@@ -497,56 +749,129 @@ preflight_check_repo_access() {
   git ls-remote "$repo_url" HEAD >/dev/null 2>&1 || missing_ref+=("$display_name ($repo_url)")
 }
 
-preflight_check_pacman_packages() {
-  local -n missing_ref="$1"
-  local pkg=""
+preflight_collect_uninstalled_packages() {
+  local -n package_ref="$1"
+  local -n missing_ref="$2"
 
-  for pkg in "${PACMAN_PACKAGES[@]}"; do
-    pacman -Si -- "$pkg" >/dev/null 2>&1 || missing_ref+=("$pkg")
-  done
+  ((${#package_ref[@]} > 0)) || return
+  command -v pacman >/dev/null 2>&1 || return
+
+  mapfile -t missing_ref < <(pacman -T "${package_ref[@]}" 2>/dev/null || true)
+}
+
+preflight_check_pacman_packages() {
+  local -n package_ref="$1"
+  local -n missing_ref="$2"
+  local err_file=""
+
+  ((${#package_ref[@]} > 0)) || return
+  command -v pacman >/dev/null 2>&1 || return
+
+  err_file="$(mktemp)"
+  register_temp_path "$err_file"
+
+  if LC_ALL=C pacman -Si -- "${package_ref[@]}" >/dev/null 2>"$err_file"; then
+    return
+  fi
+
+  mapfile -t missing_ref < <(
+    sed -nE \
+      -e "s/^error: package '([^']+)' was not found$/\1/p" \
+      -e "s/^error: target not found: (.+)$/\1/p" \
+      "$err_file" | sort -u
+  )
+
+  if ((${#missing_ref[@]} == 0)); then
+    missing_ref+=( "pacman package metadata query failed; run 'pacman -Si' manually for details" )
+  fi
 }
 
 preflight_check_aur_packages() {
-  local -n missing_ref="$1"
+  local -n package_ref="$1"
+  local -n missing_ref="$2"
   local pkg=""
   local rpc_url=""
   local response_file=""
+  local err_file=""
+  local aur_query_packages=()
+  local found_packages=()
 
-  if command -v yay >/dev/null 2>&1; then
-    for pkg in "${AUR_PACKAGES[@]}"; do
-      [[ "$pkg" == "app2unit" ]] && continue
-      yay -Si -- "$pkg" >/dev/null 2>&1 || missing_ref+=("$pkg")
+  for pkg in "${package_ref[@]}"; do
+    [[ "$pkg" == "app2unit" ]] && continue
+    aur_query_packages+=( "$pkg" )
+  done
+
+  ((${#aur_query_packages[@]} > 0)) || return
+
+  if command -v curl >/dev/null 2>&1; then
+    rpc_url="https://aur.archlinux.org/rpc/v5/info?"
+    for pkg in "${aur_query_packages[@]}"; do
+      rpc_url+="arg[]=$pkg&"
+    done
+
+    response_file="$(mktemp)"
+    register_temp_path "$response_file"
+    curl -fsSL "$rpc_url" -o "$response_file" || {
+      missing_ref+=( "AUR RPC query failed" )
+      return
+    }
+
+    mapfile -t found_packages < <(grep -o '"Name":"[^"]*"' "$response_file" | cut -d '"' -f 4 | sort -u)
+
+    for pkg in "${aur_query_packages[@]}"; do
+      array_contains "$pkg" "${found_packages[@]}" || missing_ref+=( "$pkg" )
     done
     return
   fi
 
-  rpc_url="https://aur.archlinux.org/rpc/v5/info?"
-  for pkg in "${AUR_PACKAGES[@]}"; do
-    [[ "$pkg" == "app2unit" ]] && continue
-    rpc_url+="arg[]=$pkg&"
-  done
+  if command -v yay >/dev/null 2>&1; then
+    err_file="$(mktemp)"
+    register_temp_path "$err_file"
+    yay -Si -- "${aur_query_packages[@]}" >/dev/null 2>"$err_file" && return
+    mapfile -t missing_ref < <(
+      sed -nE \
+        -e "s/^.*package '([^']+)'.*not found.*$/\1/p" \
+        -e "s/^.*target not found: (.+)$/\1/p" \
+        "$err_file" | sort -u
+    )
+    ((${#missing_ref[@]} > 0)) || missing_ref+=( "yay AUR metadata query failed" )
+    return
+  fi
 
-  response_file="$(mktemp)"
-  register_temp_path "$response_file"
-  curl -fsSL "$rpc_url" -o "$response_file" || die "Failed to query the AUR RPC endpoint during preflight."
+  warn "Skipping AUR package availability check because neither curl nor yay is available yet."
+}
 
-  mapfile -t missing_ref < <(
-    "$SYSTEM_PYTHON" - "$response_file" "${AUR_PACKAGES[@]}" <<'PY'
-import json
-import sys
+print_package_plan() {
+  local title="$1"
+  shift
 
-with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    data = json.load(fh)
+  (($# > 0)) || return
 
-found = {entry.get("Name") for entry in data.get("results", [])}
+  log "$title"
+  printf '  - %s\n' "$@"
+}
 
-for pkg in sys.argv[2:]:
-    if pkg == "app2unit":
-        continue
-    if pkg not in found:
-        print(pkg)
-PY
-  )
+print_preflight_failure_group() {
+  local title="$1"
+  shift
+
+  (($# > 0)) || return
+
+  warn "$title"
+  printf '  - %s\n' "$@" >&2
+}
+
+preflight_can_check_repos() {
+  command -v git >/dev/null 2>&1
+}
+
+preflight_note_skipped_repo_checks() {
+  if [[ "$SUBCOMMAND" =~ ^(install|deps)$ ]] && array_contains git "${INSTALL_PACMAN_PACKAGES[@]}"; then
+    warn "Skipping repository access checks because git is not installed yet; git is scheduled for installation."
+    return
+  fi
+
+  warn "Skipping repository access checks because git is not available."
 }
 
 run_preflight() {
@@ -554,9 +879,11 @@ run_preflight() {
   local missing_repos=()
   local missing_pacman_packages=()
   local missing_aur_packages=()
-  local base_commands=(bash sed diff cmp flock git readlink ln find)
-  local pkg_commands=(pacman sudo curl)
-  local build_commands=(cmake)
+  local pacman_packages_to_install=()
+  local aur_packages_to_install=()
+  local base_commands=(bash sed diff cmp flock readlink ln find)
+  local required_now_commands=()
+  local install_provided_commands=()
   local cmd=""
 
   log "Running preflight checks for '$SUBCOMMAND'..."
@@ -565,56 +892,61 @@ run_preflight() {
     preflight_check_command "$cmd" "$cmd" missing_commands
   done
 
-  if subcommand_is_mutating "$SUBCOMMAND" || [[ "$SUBCOMMAND" == "check" ]]; then
-    for cmd in "${pkg_commands[@]}"; do
-      preflight_check_command "$cmd" "$cmd" missing_commands
-    done
+  if [[ "$SUBCOMMAND" =~ ^(install|deps|check|uninstall)$ ]]; then
+    required_now_commands+=(pacman)
   fi
 
-  if [[ "$SUBCOMMAND" =~ ^(install|build|check|diagnose)$ ]]; then
-    for cmd in "${build_commands[@]}"; do
-      preflight_check_command "$cmd" "$cmd" missing_commands
-    done
-    preflight_check_command "$SYSTEM_PYTHON" "system python" missing_commands
+  if subcommand_needs_sudo "$SUBCOMMAND"; then
+    required_now_commands+=(sudo)
   fi
 
-  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] && ! command -v yay >/dev/null 2>&1; then
-    if [[ "$OS_ID" != "cachyos" ]]; then
-      preflight_check_command "makepkg" "makepkg" missing_commands
+  if [[ "$SUBCOMMAND" =~ ^(repos|link|diagnose)$ ]]; then
+    required_now_commands+=(git)
+  fi
+
+  if [[ "$SUBCOMMAND" == "build" ]]; then
+    required_now_commands+=(git cmake "$SYSTEM_PYTHON")
+  fi
+
+  if [[ "$SUBCOMMAND" == "check" ]]; then
+    install_provided_commands=(git cmake "$SYSTEM_PYTHON")
+  fi
+
+  for cmd in "${required_now_commands[@]}"; do
+    if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] && array_contains "$cmd" "${install_provided_commands[@]}"; then
+      continue
     fi
-    warn "yay not found. It will be bootstrapped during installation."
+    preflight_check_command "$cmd" "$cmd" missing_commands
+  done
+
+  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]]; then
+    preflight_collect_uninstalled_packages INSTALL_PACMAN_PACKAGES pacman_packages_to_install
+    preflight_collect_uninstalled_packages INSTALL_AUR_PACKAGES aur_packages_to_install
+    preflight_check_pacman_packages INSTALL_PACMAN_PACKAGES missing_pacman_packages
+    preflight_check_aur_packages INSTALL_AUR_PACKAGES missing_aur_packages
   fi
 
   if [[ "$SUBCOMMAND" =~ ^(install|repos|build|link|check)$ ]]; then
-    preflight_check_repo_access "$DOTFILES_REPO_URL" "dotfiles repo" missing_repos
-    preflight_check_repo_access "$CLI_REPO_URL" "CLI repo" missing_repos
-    preflight_check_repo_access "$SHELL_REPO_URL" "shell repo" missing_repos
+    if preflight_can_check_repos; then
+      preflight_check_repo_access "$DOTFILES_REPO_URL" "dotfiles repo" missing_repos
+      preflight_check_repo_access "$CLI_REPO_URL" "CLI repo" missing_repos
+      preflight_check_repo_access "$SHELL_REPO_URL" "shell repo" missing_repos
+    else
+      preflight_note_skipped_repo_checks
+    fi
   fi
 
-  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]]; then
-    preflight_check_pacman_packages missing_pacman_packages
-    preflight_check_aur_packages missing_aur_packages
+  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]] && ! command -v yay >/dev/null 2>&1; then
+    warn "yay not found. It will be bootstrapped during installation."
   fi
 
-  if ((${#missing_commands[@]} > 0)); then
-    warn "Missing commands:"
-    printf '  - %s\n' "${missing_commands[@]}" >&2
-  fi
+  print_package_plan "Official repository packages scheduled for installation:" "${pacman_packages_to_install[@]}"
+  print_package_plan "AUR packages scheduled for installation:" "${aur_packages_to_install[@]}"
 
-  if ((${#missing_repos[@]} > 0)); then
-    warn "Unavailable managed repositories:"
-    printf '  - %s\n' "${missing_repos[@]}" >&2
-  fi
-
-  if ((${#missing_pacman_packages[@]} > 0)); then
-    warn "Unavailable pacman packages:"
-    printf '  - %s\n' "${missing_pacman_packages[@]}" >&2
-  fi
-
-  if ((${#missing_aur_packages[@]} > 0)); then
-    warn "Unavailable AUR packages:"
-    printf '  - %s\n' "${missing_aur_packages[@]}" >&2
-  fi
+  print_preflight_failure_group "Missing required commands:" "${missing_commands[@]}"
+  print_preflight_failure_group "Unavailable managed repositories:" "${missing_repos[@]}"
+  print_preflight_failure_group "Unavailable pacman packages:" "${missing_pacman_packages[@]}"
+  print_preflight_failure_group "Unavailable AUR packages:" "${missing_aur_packages[@]}"
 
   if ((${#missing_commands[@]} > 0 || ${#missing_repos[@]} > 0 || ${#missing_pacman_packages[@]} > 0 || ${#missing_aur_packages[@]} > 0)); then
     die "Preflight checks failed. Resolve the issues above before continuing."
@@ -625,10 +957,10 @@ run_preflight() {
 
 install_packages() {
   log "Installing official repository packages..."
-  run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" "${PACMAN_PACKAGES[@]}"
+  run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" "${INSTALL_PACMAN_PACKAGES[@]}"
 
   log "Installing AUR packages..."
-  yay -S "${YAY_INSTALL_ARGS[@]}" "${AUR_PACKAGES[@]}"
+  yay -S "${YAY_INSTALL_ARGS[@]}" "${INSTALL_AUR_PACKAGES[@]}"
 }
 
 remove_conflicting_packages() {
@@ -1340,6 +1672,8 @@ main() {
   trap cleanup EXIT INT TERM
   acquire_lock
 
+  choose_optional_package_sets
+  build_install_package_lists
   run_preflight
 
   if [[ "$SUBCOMMAND" == "check" ]]; then
