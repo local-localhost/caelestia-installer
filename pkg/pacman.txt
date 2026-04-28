@@ -1,6 +1,7 @@
 adw-gtk-theme
 aubio
 bash
+base-devel
 brightnessctl
 btop
 cava

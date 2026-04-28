@@ -6,6 +6,7 @@ the best caelestia dotfiles installer with improvements in shell(example - more 
 
 - Arch Linux
 - CachyOS
+- EndeavourOS
 
 ## Quick start
 

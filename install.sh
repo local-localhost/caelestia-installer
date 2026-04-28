@@ -35,11 +35,9 @@ VSCODE_VARIANT=""
 AUDIO_MODE="easyeffects"
 
 PACMAN_BOOTSTRAP_ARGS=(--needed)
-PACMAN_INSTALL_ARGS=()
+PACMAN_INSTALL_ARGS=(--needed)
 PACMAN_REMOVE_ARGS=()
-YAY_BOOTSTRAP_ARGS=(--needed)
-YAY_INSTALL_ARGS=()
-MAKEPKG_ARGS=()
+YAY_INSTALL_ARGS=(--needed)
 
 BACKUP_DIR=""
 OS_ID=""
@@ -50,6 +48,8 @@ PACMAN_PACKAGES=()
 AUR_PACKAGES=()
 INSTALL_PACMAN_PACKAGES=()
 INSTALL_AUR_PACKAGES=()
+MISSING_PACMAN_INSTALL_PACKAGES=()
+MISSING_AUR_INSTALL_PACKAGES=()
 GAMING_SELECTED_PACKAGES=()
 AUDIO_VIDEO_PACKAGES=()
 EASYEFFECTS_PACKAGES=(easyeffects lsp-plugins-lv2 calf)
@@ -419,13 +419,6 @@ setup_package_args() {
     PACMAN_BOOTSTRAP_ARGS+=(--noconfirm)
     PACMAN_INSTALL_ARGS+=(--noconfirm)
     PACMAN_REMOVE_ARGS+=(--noconfirm)
-    YAY_BOOTSTRAP_ARGS+=(
-      --noconfirm
-      --answerclean None
-      --answerdiff None
-      --answeredit None
-      --answerupgrade None
-    )
     YAY_INSTALL_ARGS+=(
       --noconfirm
       --answerclean None
@@ -433,7 +426,6 @@ setup_package_args() {
       --answeredit None
       --answerupgrade None
     )
-    MAKEPKG_ARGS+=(--noconfirm)
   fi
 }
 
@@ -702,6 +694,62 @@ ensure_sudo() {
   SUDO_KEEPALIVE_PID=$!
 }
 
+chaotic_aur_repo_enabled() {
+  [[ -r /etc/pacman.conf ]] || return 1
+  grep -Eq '^[[:space:]]*\[chaotic-aur\][[:space:]]*$' /etc/pacman.conf
+}
+
+pacman_confirm_args() {
+  if $YES; then
+    printf '%s\n' --noconfirm
+  fi
+  return 0
+}
+
+install_chaotic_aur_keyring() {
+  local pacman_args=()
+
+  mapfile -t pacman_args < <(pacman_confirm_args)
+
+  run_root pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com
+  run_root pacman-key --lsign-key 3056513887B78AEB
+  run_root pacman -U "${pacman_args[@]}" 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst'
+  run_root pacman -U "${pacman_args[@]}" 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst'
+}
+
+ensure_chaotic_aur_mirrorlist() {
+  if [[ -s /etc/pacman.d/chaotic-mirrorlist ]]; then
+    return
+  fi
+
+  warn "Chaotic-AUR mirrorlist is missing; creating a minimal mirrorlist."
+  printf '%s\n' \
+    '# Chaotic-AUR Mirrorlist' \
+    'Server = https://cdn-mirror.chaotic.cx/chaotic-aur/$arch' \
+    'Server = https://geo-mirror.chaotic.cx/chaotic-aur/$arch' \
+    | run_root tee /etc/pacman.d/chaotic-mirrorlist >/dev/null
+}
+
+ensure_chaotic_aur_repo() {
+  local pacman_args=()
+
+  [[ -r /etc/pacman.conf ]] || die "Cannot read /etc/pacman.conf"
+  mapfile -t pacman_args < <(pacman_confirm_args)
+
+  if chaotic_aur_repo_enabled; then
+    log "Chaotic-AUR repository is already enabled."
+  else
+    log "Enabling Chaotic-AUR repository for yay bootstrap..."
+    install_chaotic_aur_keyring
+    ensure_chaotic_aur_mirrorlist
+    printf '\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist\n' \
+      | run_root tee -a /etc/pacman.conf >/dev/null
+  fi
+
+  ensure_chaotic_aur_mirrorlist
+  run_root pacman -Syy "${pacman_args[@]}"
+}
+
 ensure_yay() {
   if command -v yay >/dev/null 2>&1; then
     return
@@ -710,22 +758,13 @@ ensure_yay() {
   log "yay not found, installing it..."
 
   if [[ "$OS_ID" == "cachyos" ]]; then
+    log "cachyos detected; installing yay from system repositories."
     run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" yay
     return
   fi
 
-  run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" git base-devel
-  need_cmd makepkg
-
-  local tmp_dir=""
-  tmp_dir="$(mktemp -d)"
-  register_temp_path "$tmp_dir"
-
-  git clone --depth 1 https://aur.archlinux.org/yay.git "$tmp_dir/yay"
-  (
-    cd "$tmp_dir/yay"
-    makepkg -si "${MAKEPKG_ARGS[@]}"
-  )
+  ensure_chaotic_aur_repo
+  run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" yay
 }
 
 preflight_check_command() {
@@ -757,6 +796,14 @@ preflight_collect_uninstalled_packages() {
   command -v pacman >/dev/null 2>&1 || return
 
   mapfile -t missing_ref < <(pacman -T "${package_ref[@]}" 2>/dev/null || true)
+}
+
+collect_missing_install_packages() {
+  MISSING_PACMAN_INSTALL_PACKAGES=()
+  MISSING_AUR_INSTALL_PACKAGES=()
+
+  preflight_collect_uninstalled_packages INSTALL_PACMAN_PACKAGES MISSING_PACMAN_INSTALL_PACKAGES
+  preflight_collect_uninstalled_packages INSTALL_AUR_PACKAGES MISSING_AUR_INSTALL_PACKAGES
 }
 
 preflight_check_pacman_packages() {
@@ -879,8 +926,6 @@ run_preflight() {
   local missing_repos=()
   local missing_pacman_packages=()
   local missing_aur_packages=()
-  local pacman_packages_to_install=()
-  local aur_packages_to_install=()
   local base_commands=(bash sed diff cmp flock readlink ln find)
   local required_now_commands=()
   local install_provided_commands=()
@@ -920,8 +965,7 @@ run_preflight() {
   done
 
   if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]]; then
-    preflight_collect_uninstalled_packages INSTALL_PACMAN_PACKAGES pacman_packages_to_install
-    preflight_collect_uninstalled_packages INSTALL_AUR_PACKAGES aur_packages_to_install
+    collect_missing_install_packages
     preflight_check_pacman_packages INSTALL_PACMAN_PACKAGES missing_pacman_packages
     preflight_check_aur_packages INSTALL_AUR_PACKAGES missing_aur_packages
   fi
@@ -940,8 +984,8 @@ run_preflight() {
     warn "yay not found. It will be bootstrapped during installation."
   fi
 
-  print_package_plan "Official repository packages scheduled for installation:" "${pacman_packages_to_install[@]}"
-  print_package_plan "AUR packages scheduled for installation:" "${aur_packages_to_install[@]}"
+  print_package_plan "Missing official repository packages scheduled for installation:" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
+  print_package_plan "Missing AUR packages scheduled for installation:" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
 
   print_preflight_failure_group "Missing required commands:" "${missing_commands[@]}"
   print_preflight_failure_group "Unavailable managed repositories:" "${missing_repos[@]}"
@@ -956,11 +1000,21 @@ run_preflight() {
 }
 
 install_packages() {
-  log "Installing official repository packages..."
-  run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" "${INSTALL_PACMAN_PACKAGES[@]}"
+  collect_missing_install_packages
 
-  log "Installing AUR packages..."
-  yay -S "${YAY_INSTALL_ARGS[@]}" "${INSTALL_AUR_PACKAGES[@]}"
+  if ((${#MISSING_PACMAN_INSTALL_PACKAGES[@]} > 0)); then
+    print_package_plan "Installing missing official repository packages:" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
+    run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
+  else
+    log "Official repository packages are already installed."
+  fi
+
+  if ((${#MISSING_AUR_INSTALL_PACKAGES[@]} > 0)); then
+    print_package_plan "Installing missing AUR packages:" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
+    yay -S "${YAY_INSTALL_ARGS[@]}" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
+  else
+    log "AUR packages are already installed."
+  fi
 }
 
 remove_conflicting_packages() {
