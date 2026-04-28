@@ -33,8 +33,8 @@ INSTALL_DISCORD=false
 INSTALL_ZEN=false
 VSCODE_VARIANT=""
 AUDIO_MODE="easyeffects"
+SKIP_SYSTEM_UPDATE=false
 
-PACMAN_BOOTSTRAP_ARGS=(--needed)
 PACMAN_INSTALL_ARGS=(--needed)
 PACMAN_REMOVE_ARGS=()
 YAY_INSTALL_ARGS=(--needed)
@@ -77,6 +77,7 @@ Options:
   --discord             Install Discord + OpenAsar + Equicord
   --zen                 Install Zen Browser integration
   --vscode <variant>    Install editor integration. Variant: code | codium
+  --skip-system-update  Install packages without running pacman -Syu first (alias: --skip-sysupdate)
 
 Environment overrides:
   REPO_OWNER            GitHub owner for managed repos (default: local-localhost)
@@ -115,6 +116,15 @@ die() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+on_error() {
+  local exit_code=$?
+  local line_no="${1:-unknown}"
+  local command="${2:-unknown}"
+
+  [[ "$exit_code" -eq 0 ]] && return
+  printf '\033[1;31m!! Command failed with exit code %s at line %s: %s\033[0m\n' "$exit_code" "$line_no" "$command" >&2
 }
 
 system_python_purelib_dir() {
@@ -259,6 +269,15 @@ acquire_lock() {
 
 register_temp_path() {
   TEMP_DIRS+=( "$1" )
+}
+
+make_temp_dir() {
+  local prefix="$1"
+  local temp_dir=""
+
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")"
+  register_temp_path "$temp_dir"
+  printf '%s\n' "$temp_dir"
 }
 
 load_package_list() {
@@ -406,6 +425,9 @@ parse_args() {
         [[ "$1" == "code" || "$1" == "codium" ]] || die "--vscode accepts only 'code' or 'codium'"
         VSCODE_VARIANT="$1"
         ;;
+      --skip-system-update|--skip-sysupdate)
+        SKIP_SYSTEM_UPDATE=true
+        ;;
       *)
         die "Unknown argument: $1"
         ;;
@@ -416,7 +438,6 @@ parse_args() {
 
 setup_package_args() {
   if $YES; then
-    PACMAN_BOOTSTRAP_ARGS+=(--noconfirm)
     PACMAN_INSTALL_ARGS+=(--noconfirm)
     PACMAN_REMOVE_ARGS+=(--noconfirm)
     YAY_INSTALL_ARGS+=(
@@ -694,63 +715,11 @@ ensure_sudo() {
   SUDO_KEEPALIVE_PID=$!
 }
 
-chaotic_aur_repo_enabled() {
-  [[ -r /etc/pacman.conf ]] || return 1
-  grep -Eq '^[[:space:]]*\[chaotic-aur\][[:space:]]*$' /etc/pacman.conf
-}
-
-pacman_confirm_args() {
-  if $YES; then
-    printf '%s\n' --noconfirm
-  fi
-  return 0
-}
-
-install_chaotic_aur_keyring() {
-  local pacman_args=()
-
-  mapfile -t pacman_args < <(pacman_confirm_args)
-
-  run_root pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com
-  run_root pacman-key --lsign-key 3056513887B78AEB
-  run_root pacman -U "${pacman_args[@]}" 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst'
-  run_root pacman -U "${pacman_args[@]}" 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst'
-}
-
-ensure_chaotic_aur_mirrorlist() {
-  if [[ -s /etc/pacman.d/chaotic-mirrorlist ]]; then
-    return
-  fi
-
-  warn "Chaotic-AUR mirrorlist is missing; creating a minimal mirrorlist."
-  printf '%s\n' \
-    '# Chaotic-AUR Mirrorlist' \
-    'Server = https://cdn-mirror.chaotic.cx/chaotic-aur/$arch' \
-    'Server = https://geo-mirror.chaotic.cx/chaotic-aur/$arch' \
-    | run_root tee /etc/pacman.d/chaotic-mirrorlist >/dev/null
-}
-
-ensure_chaotic_aur_repo() {
-  local pacman_args=()
-
-  [[ -r /etc/pacman.conf ]] || die "Cannot read /etc/pacman.conf"
-  mapfile -t pacman_args < <(pacman_confirm_args)
-
-  if chaotic_aur_repo_enabled; then
-    log "Chaotic-AUR repository is already enabled."
-  else
-    log "Enabling Chaotic-AUR repository for yay bootstrap..."
-    install_chaotic_aur_keyring
-    ensure_chaotic_aur_mirrorlist
-    printf '\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist\n' \
-      | run_root tee -a /etc/pacman.conf >/dev/null
-  fi
-
-  ensure_chaotic_aur_mirrorlist
-  run_root pacman -Syy "${pacman_args[@]}"
-}
-
 ensure_yay() {
+  local build_root=""
+  local yay_dir=""
+  local makepkg_args=(-si)
+
   if command -v yay >/dev/null 2>&1; then
     return
   fi
@@ -759,12 +728,24 @@ ensure_yay() {
 
   if [[ "$OS_ID" == "cachyos" ]]; then
     log "cachyos detected; installing yay from system repositories."
-    run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" yay
+    run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" yay
     return
   fi
 
-  ensure_chaotic_aur_repo
-  run_root pacman -S "${PACMAN_BOOTSTRAP_ARGS[@]}" yay
+  need_cmd git
+  need_cmd makepkg
+
+  $YES && makepkg_args+=(--noconfirm)
+
+  build_root="$(make_temp_dir caelestia-yay-build)"
+  yay_dir="$build_root/yay-bin"
+
+  log "Bootstrapping yay from the official AUR package: yay-bin"
+  git clone https://aur.archlinux.org/yay-bin.git "$yay_dir"
+  (
+    cd "$yay_dir"
+    makepkg "${makepkg_args[@]}"
+  )
 }
 
 preflight_check_command() {
@@ -926,7 +907,7 @@ run_preflight() {
   local missing_repos=()
   local missing_pacman_packages=()
   local missing_aur_packages=()
-  local base_commands=(bash sed diff cmp flock readlink ln find)
+  local base_commands=(bash sed diff cmp flock readlink ln find mktemp)
   local required_now_commands=()
   local install_provided_commands=()
   local cmd=""
@@ -964,7 +945,7 @@ run_preflight() {
     preflight_check_command "$cmd" "$cmd" missing_commands
   done
 
-  if [[ "$SUBCOMMAND" =~ ^(install|deps|check)$ ]]; then
+  if [[ "$SUBCOMMAND" == "check" ]]; then
     collect_missing_install_packages
     preflight_check_pacman_packages INSTALL_PACMAN_PACKAGES missing_pacman_packages
     preflight_check_aur_packages INSTALL_AUR_PACKAGES missing_aur_packages
@@ -984,8 +965,10 @@ run_preflight() {
     warn "yay not found. It will be bootstrapped during installation."
   fi
 
-  print_package_plan "Missing official repository packages scheduled for installation:" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
-  print_package_plan "Missing AUR packages scheduled for installation:" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
+  if [[ "$SUBCOMMAND" == "check" ]]; then
+    print_package_plan "Official repository packages not installed:" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
+    print_package_plan "AUR packages not installed:" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
+  fi
 
   print_preflight_failure_group "Missing required commands:" "${missing_commands[@]}"
   print_preflight_failure_group "Unavailable managed repositories:" "${missing_repos[@]}"
@@ -999,22 +982,39 @@ run_preflight() {
   log "Preflight checks passed."
 }
 
-install_packages() {
+install_official_packages() {
+  local pacman_action=(-Syu)
+
   collect_missing_install_packages
 
   if ((${#MISSING_PACMAN_INSTALL_PACKAGES[@]} > 0)); then
     print_package_plan "Installing missing official repository packages:" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
-    run_root pacman -S "${PACMAN_INSTALL_ARGS[@]}" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
+    if $SKIP_SYSTEM_UPDATE; then
+      warn "Skipping system update before package installation at user request."
+      pacman_action=(-S)
+    fi
+    run_root pacman "${pacman_action[@]}" "${PACMAN_INSTALL_ARGS[@]}" "${MISSING_PACMAN_INSTALL_PACKAGES[@]}"
   else
     log "Official repository packages are already installed."
   fi
+}
+
+install_aur_packages() {
+  collect_missing_install_packages
 
   if ((${#MISSING_AUR_INSTALL_PACKAGES[@]} > 0)); then
+    ensure_yay
     print_package_plan "Installing missing AUR packages:" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
     yay -S "${YAY_INSTALL_ARGS[@]}" "${MISSING_AUR_INSTALL_PACKAGES[@]}"
   else
     log "AUR packages are already installed."
   fi
+}
+
+install_packages() {
+  install_official_packages
+  cleanup_old_install_state
+  install_aur_packages
 }
 
 remove_conflicting_packages() {
@@ -1591,8 +1591,6 @@ run_install_command() {
     die "Installation cancelled by user."
   fi
 
-  ensure_yay
-  cleanup_old_install_state
   install_packages
   install_cli
   install_shell
@@ -1611,8 +1609,6 @@ run_deps_command() {
     die "Dependency installation cancelled by user."
   fi
 
-  ensure_yay
-  cleanup_old_install_state
   install_packages
 }
 
@@ -1723,9 +1719,13 @@ main() {
   ensure_not_root
   require_supported_os
   load_package_lists
-  trap cleanup EXIT INT TERM
+  trap 'on_error $LINENO "$BASH_COMMAND"' ERR
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   acquire_lock
 
+  choose_confirmation_mode
   choose_optional_package_sets
   build_install_package_lists
   run_preflight
@@ -1734,7 +1734,6 @@ main() {
     return
   fi
 
-  choose_confirmation_mode
   setup_package_args
   export PACMAN_AUTH="${PACMAN_AUTH:-sudo}"
 
