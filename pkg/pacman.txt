@@ -48,6 +48,7 @@ starship
 swappy
 thunar
 gvfs
+thunar-archive-plugin
 ark
 kate
 trash-cli
