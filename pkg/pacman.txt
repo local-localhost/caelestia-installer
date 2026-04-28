@@ -11,6 +11,7 @@ dconf
 ddcutil
 eza
 fastfetch
+ntfs-3g
 fish
 foot
 fuzzel
